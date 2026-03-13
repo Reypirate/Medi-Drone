@@ -1,0 +1,277 @@
+services:
+  # ──────────────────────────────────────────────────────────────────
+  # Databases
+  # ──────────────────────────────────────────────────────────────────
+
+  mysql-inventory:
+    image: mysql:8.0
+    container_name: mysql-inventory
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - ./services/inventory/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - medidrone-net
+
+  mysql-drone:
+    image: mysql:8.0
+    container_name: mysql-drone
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - ./services/drone_management/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - medidrone-net
+
+  mysql-hospital:
+    image: mysql:8.0
+    container_name: mysql-hospital
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - ./services/hospital_mock/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - medidrone-net
+
+  # ──────────────────────────────────────────────────────────────────
+  # Message Broker
+  # ──────────────────────────────────────────────────────────────────
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - medidrone-net
+
+  # ──────────────────────────────────────────────────────────────────
+  # Atomic Microservices
+  # ──────────────────────────────────────────────────────────────────
+
+  inventory:
+    build: ./services/inventory
+    container_name: inventory
+    ports:
+      - "5003:5003"
+    environment:
+      MYSQL_HOST: mysql-inventory
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    depends_on:
+      mysql-inventory:
+        condition: service_healthy
+    networks:
+      - medidrone-net
+
+  hospital:
+    build: ./services/hospital_mock
+    container_name: hospital
+    ports:
+      - "5005:5005"
+    environment:
+      MYSQL_HOST: mysql-hospital
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    depends_on:
+      mysql-hospital:
+        condition: service_healthy
+    networks:
+      - medidrone-net
+
+  drone-management:
+    build: ./services/drone_management
+    container_name: drone-management
+    ports:
+      - "5008:5008"
+    environment:
+      MYSQL_HOST: mysql-drone
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    depends_on:
+      mysql-drone:
+        condition: service_healthy
+    networks:
+      - medidrone-net
+
+  weather:
+    build: ./services/weather
+    container_name: weather
+    ports:
+      - "5006:5006"
+    environment:
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY:-}
+    networks:
+      - medidrone-net
+
+  geolocation:
+    build: ./services/geolocation
+    container_name: geolocation
+    ports:
+      - "5007:5007"
+    environment:
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+    networks:
+      - medidrone-net
+
+  route-planning:
+    build: ./services/route_planning
+    container_name: route-planning
+    ports:
+      - "5009:5009"
+    networks:
+      - medidrone-net
+
+  notification:
+    build: ./services/notification
+    container_name: notification
+    ports:
+      - "5004:5004"
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      TWILIO_TO_NUMBER: ${TWILIO_TO_NUMBER:-}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - medidrone-net
+
+  # ──────────────────────────────────────────────────────────────────
+  # Composite Microservices
+  # ──────────────────────────────────────────────────────────────────
+
+  order:
+    build: ./services/order
+    container_name: order
+    ports:
+      - "5001:5001"
+    environment:
+      INVENTORY_URL: http://inventory:5003
+      HOSPITAL_URL: http://hospital:5005
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      inventory:
+        condition: service_started
+      hospital:
+        condition: service_started
+    networks:
+      - medidrone-net
+
+  drone-dispatch:
+    build: ./services/drone_dispatch
+    container_name: drone-dispatch
+    ports:
+      - "5002:5002"
+    environment:
+      ORDER_URL: http://order:5001
+      HOSPITAL_URL: http://hospital:5005
+      GEOLOCATION_URL: http://geolocation:5007
+      DRONE_MGMT_URL: http://drone-management:5008
+      WEATHER_URL: http://weather:5006
+      ROUTE_URL: http://route-planning:5009
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      POLL_INTERVAL: 30
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      order:
+        condition: service_started
+      hospital:
+        condition: service_started
+      geolocation:
+        condition: service_started
+      drone-management:
+        condition: service_started
+      weather:
+        condition: service_started
+      route-planning:
+        condition: service_started
+    networks:
+      - medidrone-net
+
+  # ──────────────────────────────────────────────────────────────────
+  # API Gateway (BTL)
+  # ──────────────────────────────────────────────────────────────────
+
+  kong:
+    image: kong:3.8
+    container_name: kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+    volumes:
+      - ./kong:/kong
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    depends_on:
+      order:
+        condition: service_started
+      drone-dispatch:
+        condition: service_started
+    networks:
+      - medidrone-net
+
+  # ──────────────────────────────────────────────────────────────────
+  # Web UI
+  # ──────────────────────────────────────────────────────────────────
+
+  ui:
+    image: nginx:alpine
+    container_name: medidrone-ui
+    volumes:
+      - ./ui:/usr/share/nginx/html:ro
+      - ./ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      kong:
+        condition: service_started
+    networks:
+      - medidrone-net
+
+networks:
+  medidrone-net:
+    driver: bridge

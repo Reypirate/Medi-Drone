@@ -1,0 +1,19 @@
+CREATE DATABASE IF NOT EXISTS drone_db;
+USE drone_db;
+
+CREATE TABLE IF NOT EXISTS drone (
+    drone_id VARCHAR(50) PRIMARY KEY,
+    battery INT NOT NULL DEFAULT 100,
+    status VARCHAR(20) NOT NULL DEFAULT 'OPERATIONAL',
+    lat DOUBLE NOT NULL,
+    lng DOUBLE NOT NULL
+);
+
+INSERT INTO drone (drone_id, battery, status, lat, lng) VALUES
+    ('D-01', 81, 'OPERATIONAL', 1.2900, 103.8400),
+    ('D-02', 18, 'LOW_BATTERY', 1.2750, 103.8200),
+    ('D-03', 55, 'FAULTY', 1.3000, 103.8500),
+    ('D-04', 74, 'OPERATIONAL', 1.2850, 103.8350),
+    ('D-05', 95, 'OPERATIONAL', 1.3100, 103.8450),
+    ('D-06', 42, 'OPERATIONAL', 1.2980, 103.8280)
+ON DUPLICATE KEY UPDATE battery=VALUES(battery);

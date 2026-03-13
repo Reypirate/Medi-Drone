@@ -1,0 +1,118 @@
+_format_version: "3.0"
+
+services:
+  - name: order-service
+    url: http://order:5001
+    routes:
+      - name: order-routes
+        paths:
+          - /api/order
+          - /api/orders
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - OPTIONS
+
+  - name: dispatch-service
+    url: http://drone-dispatch:5002
+    routes:
+      - name: dispatch-routes
+        paths:
+          - /api/dispatch
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - OPTIONS
+
+  - name: inventory-service
+    url: http://inventory:5003
+    routes:
+      - name: inventory-routes
+        paths:
+          - /api/inventory
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - OPTIONS
+
+  - name: hospital-service
+    url: http://hospital:5005
+    routes:
+      - name: hospital-routes
+        paths:
+          - /api/hospital
+          - /api/hospitals
+        strip_path: true
+        methods:
+          - GET
+          - OPTIONS
+
+  - name: drone-management-service
+    url: http://drone-management:5008
+    routes:
+      - name: drone-routes
+        paths:
+          - /api/drones
+        strip_path: true
+        methods:
+          - GET
+          - PATCH
+          - OPTIONS
+
+  - name: weather-service
+    url: http://weather:5006
+    routes:
+      - name: weather-routes
+        paths:
+          - /api/weather
+        strip_path: true
+        methods:
+          - GET
+          - POST
+          - OPTIONS
+
+  - name: notification-service
+    url: http://notification:5004
+    routes:
+      - name: notification-routes
+        paths:
+          - /api/notification
+        strip_path: true
+        methods:
+          - GET
+          - OPTIONS
+
+  - name: geolocation-service
+    url: http://geolocation:5007
+    routes:
+      - name: geolocation-routes
+        paths:
+          - /api/geolocation
+        strip_path: true
+        methods:
+          - GET
+          - OPTIONS
+
+plugins:
+  - name: cors
+    config:
+      origins:
+        - "*"
+      methods:
+        - GET
+        - POST
+        - PUT
+        - PATCH
+        - DELETE
+        - OPTIONS
+      headers:
+        - Content-Type
+        - Authorization
+        - Accept
+      exposed_headers:
+        - X-Auth-Token
+      credentials: false
+      max_age: 3600
