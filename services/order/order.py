@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import math
 import uuid
@@ -9,8 +10,16 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import amqp_setup
 
+# Add parent directory to path for common module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from common.request_tracking import (
+    get_request_id, set_request_id, extract_request_id_from_amqp,
+    log_with_context, init_flask_request_tracking
+)
+
 app = Flask(__name__)
 CORS(app)
+init_flask_request_tracking(app)
 
 INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://inventory:5003")
 HOSPITAL_URL = os.environ.get("HOSPITAL_URL", "http://hospital:5005")
@@ -36,18 +45,28 @@ def init_amqp():
 
 def publish_message(exchange, routing_key, message):
     global amqp_channel, amqp_connection
+    request_id = get_request_id()
+
     try:
         if amqp_channel is None or amqp_channel.is_closed:
             init_amqp()
+
+        # Include request ID in AMQP headers for tracing
+        headers = {}
+        if request_id:
+            headers['X-Request-ID'] = request_id
+
         amqp_channel.basic_publish(
             exchange=exchange,
             routing_key=routing_key,
             body=json.dumps(message),
-            properties=pika.BasicProperties(delivery_mode=2),
+            properties=pika.BasicProperties(delivery_mode=2, headers=headers),
         )
-        print(f"  [AMQP] Published to {exchange}/{routing_key}: {message.get('order_id', 'N/A')}")
+        log_with_context(None, f"AMQP Published to {exchange}/{routing_key}: {message.get('order_id', 'N/A')}",
+                       request_id=request_id, exchange=exchange, routing_key=routing_key)
     except Exception as e:
-        print(f"  [AMQP ERROR] {str(e)} — reconnecting...")
+        log_with_context(None, f"AMQP ERROR publishing to {exchange}/{routing_key}: {e}",
+                       level="error", request_id=request_id, error=str(e))
         init_amqp()
         amqp_channel.basic_publish(
             exchange=exchange,
@@ -116,14 +135,21 @@ def create_order():
     customer_address = data.get("customer_address", "")
     customer_coords = data.get("customer_coords")
 
+    request_id = get_request_id()
+    log_with_context(None, f"POST /order - Creating order: item_id={item_id}, quantity={quantity}, urgency={urgency_level}",
+                   request_id=request_id, item_id=item_id, quantity=quantity, urgency=urgency_level)
+
     if not customer_coords or "lat" not in customer_coords or "lng" not in customer_coords:
+        log_with_context(None, "Order failed: Missing customer coordinates", level="warn", request_id=request_id)
         return jsonify({"status": "FAILED", "reason": "CUSTOMER_COORDS_REQUIRED",
                         "message": "Validated customer coordinates are required."}), 400
 
     if not item_id:
+        log_with_context(None, "Order failed: Missing item_id", level="warn", request_id=request_id)
         return jsonify({"status": "FAILED", "reason": "ITEM_ID_REQUIRED"}), 400
 
     order_id = f"ORD-{uuid.uuid4().hex[:6].upper()}"
+    log_with_context(None, f"Generated order_id: {order_id}", request_id=request_id, order_id=order_id)
 
     # Auto-select nearest hospital with stock
     nearest, error = find_nearest_hospital(customer_coords, item_id, quantity)
@@ -134,6 +160,7 @@ def create_order():
             "customer_address": customer_address, "status": f"FAILED_{error}",
             "drone_id": None, "eta_minutes": None, "dispatch_status": None,
         }
+        log_with_context(None, f"Order {order_id} failed: {error}", level="error", request_id=request_id, order_id=order_id, error=error)
         publish_message("notifications", "notify.sms", {
             "event_type": "ORDER_FAILED",
             "order_id": order_id,
@@ -147,7 +174,9 @@ def create_order():
 
     hospital_id = nearest["hospital_id"]
     hospital_name = nearest["name"]
-    print(f"  [ORDER] Auto-selected {hospital_id} ({hospital_name}) at {nearest['distance_km']:.1f}km for {order_id}")
+    log_with_context(None, f"Auto-selected hospital: {hospital_id} ({hospital_name}) at {nearest['distance_km']:.1f}km",
+                   request_id=request_id, order_id=order_id, hospital_id=hospital_id, hospital_name=hospital_name,
+                   distance_km=round(nearest['distance_km'], 2))
 
     orders[order_id] = {
         "order_id": order_id,
@@ -164,19 +193,25 @@ def create_order():
     }
 
     # Reserve inventory from the selected hospital
+    log_with_context(None, f"Reserving inventory: {item_id} x{quantity} from {hospital_id}",
+                   request_id=request_id, order_id=order_id, item_id=item_id, quantity=quantity)
     try:
         reserve_resp = http_requests.post(
             f"{INVENTORY_URL}/inventory/reserve",
             json={"order_id": order_id, "hospital_id": hospital_id, "item_id": item_id, "quantity": quantity},
+            headers={"X-Request-ID": request_id or ""},
             timeout=10,
         )
         reserve_data = reserve_resp.json()
     except Exception as e:
         orders[order_id]["status"] = "ERROR"
+        log_with_context(None, f"Inventory service error: {e}", level="error", request_id=request_id, order_id=order_id)
         return jsonify({"order_id": order_id, "status": "ERROR", "message": f"Inventory service unavailable: {e}"}), 503
 
     if reserve_data.get("status") != "RESERVED":
         orders[order_id]["status"] = "FAILED_STOCK"
+        log_with_context(None, f"Inventory reservation failed: {reserve_data.get('reason', 'UNKNOWN')}",
+                       level="warn", request_id=request_id, order_id=order_id, reason=reserve_data.get("reason"))
 
         publish_message("orders", "order.failed", {
             "order_id": order_id,
@@ -198,6 +233,8 @@ def create_order():
         }), 409
 
     orders[order_id]["status"] = "CONFIRMED"
+    log_with_context(None, f"Order {order_id} CONFIRMED - Publishing order.confirmed event",
+                   request_id=request_id, order_id=order_id, status="CONFIRMED")
 
     publish_message("orders", "order.confirmed", {
         "order_id": order_id,
