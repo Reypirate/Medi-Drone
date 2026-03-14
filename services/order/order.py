@@ -16,6 +16,7 @@ from common.request_tracking import (
 app = Flask(__name__)
 CORS(app)
 init_flask_request_tracking(app)
+print("  [ORDER] Request tracking initialized")
 
 INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://inventory:5003")
 HOSPITAL_URL = os.environ.get("HOSPITAL_URL", "http://hospital:5005")
