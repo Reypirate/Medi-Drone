@@ -1,7 +1,22 @@
+# Environment
 .env
+
+# Python
 __pycache__/
 *.pyc
+
+# OS
 .DS_Store
 *.log
+
+# Node
 node_modules/
+
+# IDE
 .vscode/
+.idea/
+
+# Claude Code
+.claude/
+CLAUDE.md
+memory/
