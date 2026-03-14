@@ -172,7 +172,9 @@ services:
   # ──────────────────────────────────────────────────────────────────
 
   order:
-    build: ./services/order
+    build:
+      context: ./services
+      dockerfile: order/Dockerfile
     container_name: order
     ports:
       - "5001:5001"

@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import math
 import uuid
@@ -9,9 +8,6 @@ import pika
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import amqp_setup
-
-# Add parent directory to path for common module
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from common.request_tracking import (
     get_request_id, set_request_id, extract_request_id_from_amqp,
     log_with_context, init_flask_request_tracking
