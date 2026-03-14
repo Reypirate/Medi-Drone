@@ -50,15 +50,137 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
   - Expected output confirmed: `[AMQP] Attempting connection to rabbitmq:5672 (attempt 1/12)...`, `[AMQP] Connected successfully to rabbitmq:5672`, `[AMQP] Declared exchange: orders (topic)`, etc.
   - Note: drone-dispatch consumer thread startup issue is a pre-existing bug, not caused by logging changes
 
-### 🔲 Fix 3: active_missions Size Tracking
-- **Status**: Not started (blocked by Fix 2)
+### ✅ Fix 3: active_missions Size Tracking
+- **Branch**: `fix/phase1-active-missions-tracking`
+- **Status**: Complete & Tested
+- **Changes**:
+  - Added logging when missions are added to active_missions
+  - Added logging when missions are removed/aborted
+  - Added periodic logging in poll thread showing active missions count
+- **Testing**:
+  - Date tested: 2026-03-14
+  - Polling thread logging confirmed: `[MISSIONS] Polling thread started | Active missions: 0`
+  - Health endpoint already returns active_missions count
+  - Note: Full mission flow testing blocked by pre-existing AMQP consumer bug
 
 ### 🔲 Fix 4: Health Check Endpoints
-- **Status**: Not started (blocked by Fix 3)
+- **Status**: Not started
 
 ---
 
-## Next Fix to Implement: Fix 2 - AMQP Connection Lifecycle Logging
+## Next Fix to Implement: Fix 3 - active_missions Size Tracking
+
+### Step-by-Step Instructions
+
+**Purpose**: Add logging when missions are added to or removed from the `active_missions` dictionary in drone-dispatch service. This helps track how many missions are active at any time.
+
+**STEP 1**: Switch to main branch and create new branch
+```bash
+git checkout main
+git checkout -b fix/phase1-active-missions-tracking
+```
+
+**STEP 2**: Update `services/drone_dispatch/drone_dispatch.py` - add logging when mission is added
+
+Find the line where mission is registered in `dispatch_order` function (around line 206) and add logging AFTER the mission is added:
+
+```python
+    # Register active mission for Scenario 3 polling
+    active_missions[order_id] = {
+        "order_id": order_id,
+        "drone_id": selected_drone,
+        "hospital_coords": hospital_coords,
+        "customer_coords": customer_coords,
+        "current_coords": hospital_coords.copy(),
+        "dispatch_status": "IN_FLIGHT",
+        "eta_minutes": eta_minutes,
+        "payload_weight": payload_weight,
+    }
+    print(f"  [MISSIONS] Mission added: {order_id} | Active missions: {len(active_missions)}")
+```
+
+**STEP 3**: Add logging when mission is aborted/removed
+
+Find the `handle_mission_abort` function (around line 328) and add logging BEFORE the mission is deleted (around line 359):
+
+```python
+    del active_missions[order_id]
+    print(f"  [MISSIONS] Mission aborted: {order_id} | Active missions: {len(active_missions)}")
+```
+
+**STEP 4**: Add periodic logging for active missions count
+
+In the `poll_active_missions` function (around line 247), add logging at the start of each poll cycle:
+
+```python
+def poll_active_missions():
+    """Background thread that polls weather for all active in-flight missions."""
+    print(f"  [MISSIONS] Polling thread started | Active missions: {len(active_missions)}")
+    while True:
+        time.sleep(POLL_INTERVAL_SECONDS)
+        print(f"  [MISSIONS] Polling {len(active_missions)} active missions...")
+```
+
+**STEP 5**: Test the changes
+```bash
+# Build and start services
+docker-compose up -d --build order drone-dispatch notification inventory hospital
+
+# Wait for services to start
+sleep 20
+
+# Place a test order
+curl -X POST http://localhost:5001/order \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_id": "BLOOD-O-NEG",
+    "quantity": 1,
+    "urgency_level": "NORMAL",
+    "customer_coords": {"lat": 1.35, "lng": 103.8}
+  }'
+
+# Check drone-dispatch logs for mission tracking
+docker logs drone-dispatch | grep "\[MISSIONS\]"
+```
+
+Expected output should include:
+```
+[MISSIONS] Polling thread started | Active missions: 0
+[MISSIONS] Polling 0 active missions...
+[MISSIONS] Mission added: ORD-XXXXXX | Active missions: 1
+[MISSIONS] Polling 1 active missions...
+```
+
+**STEP 6**: Commit changes
+```bash
+git add -A
+git commit -m "Phase 1 Fix: Add active_missions size tracking
+
+- Log when missions are added to active_missions
+- Log when missions are removed/aborted
+- Log active missions count periodically in poll thread
+- Helps track how many missions are active at any time
+
+Services updated: drone_dispatch"
+```
+
+---
+
+## Future Fix: Fix 4 - Health Check Endpoints
+
+**Purpose**: Ensure all services have `/health` endpoints for monitoring. This fix will be implemented after Fix 3 is complete and tested.
+
+**Services to check**:
+- order: needs `/health` endpoint
+- inventory: check if `/health` exists
+- hospital: check if `/health` exists
+- Other services: verify health endpoints
+
+**Detailed steps to be added after Fix 3 completion.**
+
+---
+
+## Fix 2 Instructions (Archived - Already Complete)
 
 ### Step-by-Step Instructions
 

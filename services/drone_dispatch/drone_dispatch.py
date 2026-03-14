@@ -213,6 +213,7 @@ def dispatch_order(order_data):
         "eta_minutes": eta_minutes,
         "payload_weight": payload_weight,
     }
+    print(f"  [MISSIONS] Mission added: {order_id} | Active missions: {len(active_missions)}")
 
 
 CANCEL_MESSAGES = {
@@ -246,8 +247,10 @@ def cancel_order(order_id, reason, detail_message=None):
 
 def poll_active_missions():
     """Background thread that polls weather for all active in-flight missions."""
+    print(f"  [MISSIONS] Polling thread started | Active missions: {len(active_missions)}")
     while True:
         time.sleep(POLL_INTERVAL_SECONDS)
+        print(f"  [MISSIONS] Polling {len(active_missions)} active missions...")
 
         for order_id, mission in list(active_missions.items()):
             if mission["dispatch_status"] not in ("IN_FLIGHT", "REROUTED_IN_FLIGHT"):
@@ -358,6 +361,7 @@ def handle_mission_abort(order_id, mission):
 
     del active_missions[order_id]
     print(f"  [ABORT] Mission {order_id} aborted. Drone {mission['drone_id']} returning to origin.")
+    print(f"  [MISSIONS] Mission aborted: {order_id} | Active missions: {len(active_missions)}")
 
 
 # ---------------------------------------------------------------------------
