@@ -10,13 +10,18 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
 
 ### ✅ Fix 1: Request ID Tracking
 - **Branch**: `fix/phase1-add-request-id-tracking`
-- **Status**: Complete
+- **Status**: Complete & Tested
 - **Changes**:
   - Created `services/common/request_tracking.py` utility module
   - Updated Order Service to include request IDs in logs and AMQP headers
   - Added structured logging with request context
   - Updated Order Service Dockerfile to copy common module
-- **Testing**: Not yet tested
+  - Fixed output buffering issue (added `flush=True` to print statements)
+- **Testing**:
+  - Verified unique request IDs for each request (e.g., REQ-C69A61860CA2, REQ-9FA2A6B98CF1, REQ-DDEEA92F806A)
+  - Verified request ID appears throughout entire request flow
+  - Verified response headers include X-Request-ID
+  - Tested successful orders and failed orders (NO_HOSPITAL_WITH_STOCK)
 
 ---
 

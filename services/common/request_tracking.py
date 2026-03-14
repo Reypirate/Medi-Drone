@@ -44,6 +44,7 @@ def log_with_context(logger, message, level="info", **extra):
         level: Log level (info, warning, error)
         **extra: Additional context to include
     """
+    import sys
     request_id = get_request_id()
     timestamp = time.strftime("%H:%M:%S")
 
@@ -61,7 +62,8 @@ def log_with_context(logger, message, level="info", **extra):
     if logger:
         getattr(logger, level)(full_message)
     else:
-        print(f"  [{level.upper()}] {full_message}")
+        # Use print with flush to ensure output appears immediately
+        print(f"  [{level.upper()}] {full_message}", flush=True)
 
 
 def with_request_id(func):
