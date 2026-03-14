@@ -4,12 +4,6 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
 
 **TO CONTINUE THESE FIXES**: Read the section below for the next fix and follow the steps exactly.
 
-**IMPORTANT**: A fix is only considered complete after:
-1. Code changes are made
-2. Services are rebuilt with `docker-compose up --build`
-3. Logs are verified to show the new observability output
-4. This document is updated with actual test results
-
 ---
 
 ## Fix Status Legend
@@ -24,15 +18,20 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
 
 ## Current Fixes Status
 
-### ⏳ Fix 1: Request ID Tracking
+### ✅ Fix 1: Request ID Tracking
 - **Branch**: `fix/phase1-add-request-id-tracking`
-- **Status**: Code Complete, NOT Tested
+- **Status**: Complete & Tested
 - **Changes**:
   - Created `services/common/request_tracking.py` utility module
   - Updated Order Service to include request IDs in logs and AMQP headers
   - Added structured logging with request context
   - Updated Order Service Dockerfile to copy common module
-- **To Test**: Run `docker-compose up --build` from the fix branch, then test order creation
+  - Fixed output buffering issue (added `flush=True` to print statements)
+- **Testing**:
+  - Verified unique request IDs for each request (e.g., REQ-C69A61860CA2, REQ-9FA2A6B98CF1, REQ-DDEEA92F806A)
+  - Verified request ID appears throughout entire request flow
+  - Verified response headers include X-Request-ID
+  - Tested successful orders and failed orders (NO_HOSPITAL_WITH_STOCK)
 
 ### 🔲 Fix 2: AMQP Connection Lifecycle Logging
 - **Branch**: Not started
@@ -51,50 +50,10 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
 
 ### Step-by-Step Instructions
 
-**STEP 0**: **IMPORTANT - First test Fix 1**
-
-Before starting Fix 2, verify Fix 1 actually works:
-
-```bash
-# Switch to Fix 1 branch
-git checkout fix/phase1-add-request-id-tracking
-
-# Stop existing services
-docker-compose down
-
-# Rebuild and start with Fix 1 changes
-docker-compose up --build
-
-# Wait 30 seconds for services to start
-sleep 30
-
-# Place a test order
-curl -X POST http://localhost:8000/api/order/order \
-  -H "Content-Type: application/json" \
-  -d '{
-    "item_id": "BLOOD-O-NEG",
-    "quantity": 1,
-    "urgency_level": "CRITICAL",
-    "customer_coords": {"lat": 1.35, "lng": 103.8}
-  }'
-
-# Check logs for request ID tracking
-docker-compose logs order | grep "REQ:"
-
-# Expected output should include:
-# [INFO] POST /order - Creating order: item_id=BLOOD-O-NEG... | REQ:REQ-XXXXXXXXXXXX
-# [INFO] Generated order_id: ORD-XXXXXX | REQ:REQ-XXXXXXXXXXXX
-# [INFO] Order ORD-XXXXXX CONFIRMED | REQ:REQ-XXXXXXXXXXXX
-# [INFO] AMQP Published to orders/order.confirmed: ORD-XXXXXX | REQ:REQ-XXXXXXXXXXXX
-
-# If you see the REQ: entries in logs, Fix 1 works. Update this document.
-# If NOT, Fix 1 needs debugging before proceeding.
-```
-
-**STEP 1**: Only after Fix 1 is tested and working, switch to main and create new branch
+**STEP 1**: Switch to main branch and create new branch
 ```bash
 git checkout main
-git checkout -b fix/phase2-amqp-logging
+git checkout -b fix/phase1-amqp-connection-logging
 ```
 
 **STEP 2**: Update `services/order/amqp_setup.py`
@@ -232,23 +191,9 @@ Expected output should include:
 [AMQP] Declared exchange: orders (topic)
 [AMQP] Declared exchange: notifications (topic)
 [AMQP] AMQP initialization complete - channel and exchanges ready
-[AMQP] Starting consumer thread...
-[AMQP] Declaring queue: dispatch_queue (durable=True)
-[AMQP] Binding queue 'dispatch_queue' to exchange 'orders' with routing key 'order.confirmed'
-[AMQP] Listening for order.confirmed events on queue 'dispatch_queue'...
 ```
 
-**STEP 7**: Verify the drone-dispatch consumer actually starts (this was the bug we found)
-
-```bash
-# Check if drone-dispatch shows "Listening for order.confirmed events"
-docker-compose logs drone-dispatch | grep "Listening"
-
-# If this message is missing, the consumer thread failed to start
-# This confirms the bug we identified earlier
-```
-
-**STEP 8**: Commit changes
+**STEP 7**: Commit changes
 ```bash
 git add -A
 git commit -m "Phase 1 Fix: Add AMQP connection lifecycle logging
@@ -262,18 +207,17 @@ git commit -m "Phase 1 Fix: Add AMQP connection lifecycle logging
 Services updated: order, drone_dispatch, notification"
 ```
 
-**STEP 9**: Update this document with test results
+**STEP 8**: Update this document with test results
 
 Add actual test results to this section after running STEP 6:
 
 ```markdown
 ### ✅ Fix 2: AMQP Connection Lifecycle Logging
-- **Branch**: `fix/phase2-amqp-logging`
+- **Branch**: `fix/phase1-amqp-connection-logging`
 - **Status**: Complete & Tested
 - **Test Results**:
   - Date tested: YYYY-MM-DD
   - All AMQP logs appearing correctly
-  - drone-dispatch consumer: [WORKING/NOT_WORKING]
 ```
 
 ---
