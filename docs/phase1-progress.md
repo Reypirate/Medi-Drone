@@ -2,6 +2,10 @@
 
 This document tracks progress on Phase 1 fixes (adding observability without changing behavior).
 
+**TO CONTINUE THESE FIXES**: Read the section below for the next fix and follow the steps exactly.
+
+---
+
 ## Completed Fixes
 
 ### ✅ Fix 1: Request ID Tracking
@@ -14,128 +18,185 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
   - Updated Order Service Dockerfile to copy common module
 - **Testing**: Not yet tested
 
-## Remaining Phase 1 Fixes
+---
 
-### 🔄 Fix 2: AMQP Connection Lifecycle Logging
-- **Branch**: `fix/phase1-amqp-connection-logging` (to be created)
-- **Services to update**:
-  - `services/order/order.py`
-  - `services/drone_dispatch/drone_dispatch.py`
-  - `services/notification/notification.py`
-- **Changes needed**:
-  - Add connection attempt logging with timestamps
-  - Add disconnection/reconnection logging
-  - Log queue declaration success/failure
-  - Track number of active connections
-- **Example logging needed**:
-  ```
-  [AMQP] Connecting to rabbitmq:5672...
-  [AMQP] Connected successfully (conn_id: 123456)
-  [AMQP] Declared exchange: orders (topic)
-  [AMQP] Declared queue: dispatch_queue (bound to orders/order.confirmed)
-  ```
+## Next Fix to Implement: Fix 2 - AMQP Connection Lifecycle Logging
 
-### 🔄 Fix 3: active_missions Size Tracking
-- **Branch**: `fix/phase1-missions-tracking` (to be created)
-- **Service**: `services/drone_dispatch/drone_dispatch.py`
-- **Changes needed**:
-  - Log when mission is added to active_missions
-  - Log when mission is removed from active_missions
-  - Log current active_missions size on changes
-  - Add periodic status log (every 30 seconds)
-- **Example logging needed**:
-  ```
-  [MISSIONS] Added ORD-ABC123 to active_missions (count: 1)
-  [MISSIONS] Removed ORD-ABC123 from active_missions (count: 0)
-  [MISSIONS] Status: 0 active missions
-  ```
+### Step-by-Step Instructions
 
-### 🔄 Fix 4: Health Check Endpoints
-- **Branch**: `fix/phase1-health-endpoints` (to be created)
-- **Services**: All services
-- **Changes needed**:
-  - Add `/health` endpoint to each service
-  - Include AMQP connection status in health check
-  - Include database connection status (where applicable)
-  - Return JSON with service name and status
-- **Example response**:
-  ```json
-  {
-    "service": "order",
-    "status": "healthy",
-    "amqp_connected": true,
-    "details": {
-      "amqp_host": "rabbitmq",
-      "amqp_port": 5672
-    }
-  }
-  ```
-
-## How to Continue
-
-1. **Switch to main branch**:
-   ```bash
-   git checkout main
-   ```
-
-2. **Create next branch**:
-   ```bash
-   git checkout -b fix/phase1-amqp-connection-logging
-   ```
-
-3. **Make changes** according to the fix description above
-
-4. **Test changes**:
-   ```bash
-   docker-compose up --build
-   # Check logs for new AMQP connection messages
-   docker-compose logs order | grep AMQP
-   docker-compose logs drone-dispatch | grep AMQP
-   docker-compose logs notification | grep AMQP
-   ```
-
-5. **Commit changes** (remember: no co-author):
-   ```bash
-   git add -A
-   git commit -m "Phase 1 Fix: Add AMQP connection lifecycle logging
-
-   - Log connection attempts and results
-   - Log exchange/queue declarations
-   - Track active connections"
-   ```
-
-6. **Repeat** for remaining fixes
-
-## Testing Commands
-
-### Test Request ID Tracking (after Fix 1)
+**STEP 1**: Switch to main branch and create new branch
 ```bash
-# Place an order and check logs include request ID
-curl -X POST http://localhost:8000/api/order/order \
-  -H "Content-Type: application/json" \
-  -d '{
-    "item_id": "BLOOD-O-NEG",
-    "quantity": 1,
-    "urgency_level": "CRITICAL",
-    "customer_coords": {"lat": 1.35, "lng": 103.8}
-  }'
-
-# Check logs for request ID
-docker-compose logs order | grep "REQ:"
+git checkout main
+git checkout -b fix/phase1-amqp-connection-logging
 ```
 
-### Test AMQP Logging (after Fix 2)
+**STEP 2**: Update `services/order/amqp_setup.py`
+
+Find the `wait_for_rabbitmq` function and add logging. The file should look like this after changes:
+
+```python
+import os
+import time
+import pika
+
+RABBITMQ_HOST = os.environ.get("RABBITMQ_HOST", "rabbitmq")
+RABBITMQ_PORT = int(os.environ.get("RABBITMQ_PORT", 5672))
+
+EXCHANGES = {
+    "orders": "topic",
+    "notifications": "topic",
+}
+
+
+def wait_for_rabbitmq(max_retries=12, delay=5):
+    for attempt in range(max_retries):
+        try:
+            print(f"  [AMQP] Attempting connection to {RABBITMQ_HOST}:{RABBITMQ_PORT} (attempt {attempt + 1}/{max_retries})...")
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(host=RABBITMQ_HOST, port=RABBITMQ_PORT,
+                                          heartbeat=300, blocked_connection_timeout=300)
+            )
+            print(f"  [AMQP] Connected successfully to {RABBITMQ_HOST}:{RABBITMQ_PORT}")
+            return connection
+        except pika.exceptions.AMQPConnectionError as e:
+            print(f"  [AMQP] Connection failed: {e} - retrying in {delay}s...")
+            time.sleep(delay)
+    raise Exception("Could not connect to RabbitMQ after retries")
+
+
+def setup_exchanges(channel):
+    for exchange_name, exchange_type in EXCHANGES.items():
+        try:
+            channel.exchange_declare(exchange=exchange_name, exchange_type=exchange_type, durable=True)
+            print(f"  [AMQP] Declared exchange: {exchange_name} ({exchange_type})")
+        except Exception as e:
+            print(f"  [AMQP] Failed to declare exchange {exchange_name}: {e}")
+            raise
+
+
+def get_connection():
+    print(f"  [AMQP] Initializing AMQP connection...")
+    connection = wait_for_rabbitmq()
+    channel = connection.channel()
+    setup_exchanges(channel)
+    print(f"  [AMQP] AMQP initialization complete - channel and exchanges ready")
+    return connection, channel
+```
+
+**STEP 3**: Copy the updated `amqp_setup.py` to the other two services:
 ```bash
-# Restart services and check startup logs
-docker-compose restart order drone-dispatch notification
+cp services/order/amqp_setup.py services/drone_dispatch/amqp_setup.py
+cp services/order/amqp_setup.py services/notification/amqp_setup.py
+```
+
+**STEP 4**: Update `services/drone_dispatch/drone_dispatch.py` - add logging to `start_consumer` function
+
+Find the `start_consumer` function (around line 380-392) and update it:
+
+```python
+def start_consumer():
+    """Start the AMQP consumer for order.confirmed events."""
+    print(f"  [AMQP] Starting consumer thread...")
+    connection, channel = amqp_setup.get_connection()
+
+    queue_name = "dispatch_queue"
+    print(f"  [AMQP] Declaring queue: {queue_name} (durable=True)")
+    channel.queue_declare(queue=queue_name, durable=True)
+
+    routing_key = "order.confirmed"
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key '{routing_key}'")
+    channel.queue_bind(exchange="orders", queue=queue_name, routing_key=routing_key)
+
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=queue_name, on_message_callback=on_order_confirmed)
+
+    print(f"  [AMQP] Listening for order.confirmed events on queue '{queue_name}'...")
+    channel.start_consuming()
+```
+
+**STEP 5**: Update `services/notification/notification.py` - add logging to `start_consumer` function
+
+Find the `start_consumer` function (around line 61-74) and update it:
+
+```python
+def start_consumer():
+    """Start the AMQP consumer in a background thread."""
+    print(f"  [AMQP] Starting notification consumer...")
+    connection, channel = amqp_setup.get_connection()
+
+    queue_name = "notification_queue"
+    print(f"  [AMQP] Declaring queue: {queue_name} (durable=True)")
+    channel.queue_declare(queue=queue_name, durable=True)
+
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'notifications' with routing key 'notify.sms'")
+    channel.queue_bind(exchange="notifications", queue=queue_name, routing_key="notify.sms")
+
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key 'order.failed'")
+    channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.failed")
+
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=queue_name, on_message_callback=on_notification)
+
+    print(f"  [AMQP] Listening for notification messages on queue '{queue_name}'...")
+    channel.start_consuming()
+```
+
+**STEP 6**: Test the changes
+```bash
+# Stop existing services
+docker-compose down
+
+# Rebuild and start
+docker-compose up --build
+
+# Wait 30 seconds for services to start, then check logs
+sleep 30
+
+# Check for AMQP logging
 docker-compose logs order | grep "\[AMQP\]"
 docker-compose logs drone-dispatch | grep "\[AMQP\]"
 docker-compose logs notification | grep "\[AMQP\]"
 ```
 
-### Test Missions Tracking (after Fix 3)
+Expected output should include:
+```
+[AMQP] Attempting connection to rabbitmq:5672 (attempt 1/12)...
+[AMQP] Connected successfully to rabbitmq:5672
+[AMQP] Declared exchange: orders (topic)
+[AMQP] Declared exchange: notifications (topic)
+[AMQP] AMQP initialization complete - channel and exchanges ready
+```
+
+**STEP 7**: Commit changes
 ```bash
-# Place an order and check mission tracking logs
+git add -A
+git commit -m "Phase 1 Fix: Add AMQP connection lifecycle logging
+
+- Log connection attempts with attempt numbers
+- Log successful connections with host:port
+- Log exchange declarations
+- Log queue declarations and bindings
+- Log consumer startup
+
+Services updated: order, drone_dispatch, notification"
+```
+
+---
+
+## Future Fixes (Not Yet Ready)
+
+### Fix 3: active_missions Size Tracking
+**WAIT** - Do not start until Fix 2 is complete and tested.
+
+### Fix 4: Health Check Endpoints
+**WAIT** - Do not start until Fix 3 is complete and tested.
+
+---
+
+## Quick Reference Commands
+
+### Place a test order
+```bash
 curl -X POST http://localhost:8000/api/order/order \
   -H "Content-Type: application/json" \
   -d '{
@@ -144,28 +205,33 @@ curl -X POST http://localhost:8000/api/order/order \
     "urgency_level": "CRITICAL",
     "customer_coords": {"lat": 1.35, "lng": 103.8}
   }'
-
-# Check logs for mission tracking
-docker-compose logs drone-dispatch | grep "\[MISSIONS\]"
 ```
 
-### Test Health Endpoints (after Fix 4)
+### Check logs by service
 ```bash
-curl http://localhost:5001/health
-curl http://localhost:5002/health
-curl http://localhost:5003/health
-curl http://localhost:5004/health
-curl http://localhost:5005/health
-curl http://localhost:5006/health
-curl http://localhost:5007/health
-curl http://localhost:5008/health
-curl http://localhost:5009/health
+docker-compose logs order | tail -50
+docker-compose logs drone-dispatch | tail -50
+docker-compose logs notification | tail -50
 ```
 
-## Important Notes
+### Restart specific service
+```bash
+docker-compose restart order
+docker-compose restart drone-dispatch
+docker-compose restart notification
+```
 
+### Check container status
+```bash
+docker-compose ps
+```
+
+---
+
+## Important Reminders
+
+- **NO co-author tags** in commit messages
 - Each fix gets its own branch
-- Test each fix independently before merging
+- Test each fix independently before proceeding
 - No behavioral changes - only observability
-- Remember: NO co-author in commit messages
-- Update this document as you complete fixes
+- Update this document after completing each fix
