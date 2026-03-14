@@ -63,8 +63,23 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
   - Health endpoint already returns active_missions count
   - Note: Full mission flow testing blocked by pre-existing AMQP consumer bug
 
-### 🔲 Fix 4: Health Check Endpoints
-- **Status**: Not started
+### ✅ Fix 4: Health Check Endpoints
+- **Branch**: `fix/phase1-health-check-endpoints`
+- **Status**: Complete & Tested
+- **Changes**:
+  - Added `/health` endpoint to order service (includes orders_count)
+  - Added `/health` endpoint to inventory service (includes inventory_count, database status)
+  - Added `/health` endpoint to hospital service (includes hospital_count, database status)
+  - Added `/health` endpoint to drone_management service (includes drones_count, database status)
+  - Added `/health` endpoint to weather service (includes API key status)
+  - Added `/health` endpoint to geolocation service (includes API key status, cache_size)
+  - Added `/health` endpoint to route_planning service
+  - Services already with health endpoints: drone-dispatch, notification
+- **Testing**:
+  - Date tested: 2026-03-14
+  - All services returning healthy status
+  - Database-connected services showing counts (inventory: 25, hospital: 5, drones: 6)
+  - External API services showing configured status
 
 ---
 

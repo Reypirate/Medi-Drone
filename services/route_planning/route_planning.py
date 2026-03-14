@@ -260,6 +260,11 @@ def reroute():
     })
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "healthy", "service": "route-planning"})
+
+
 if __name__ == "__main__":
     print("  Route Planning Service running on port 5009")
     app.run(host="0.0.0.0", port=5009, debug=True)

@@ -118,6 +118,20 @@ def list_all():
         conn.close()
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM drone")
+        count = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "healthy", "service": "drone-management", "database": "connected", "drones_count": count[0] if count else 0})
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "service": "drone-management", "error": str(e)}), 503
+
+
 if __name__ == "__main__":
     wait_for_db()
     print("  Drone Management Service running on port 5008")

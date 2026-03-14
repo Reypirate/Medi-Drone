@@ -192,6 +192,20 @@ def search():
         conn.close()
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM inventory")
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "healthy", "service": "inventory", "database": "connected", "inventory_count": result[0] if result else 0})
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "service": "inventory", "error": str(e)}), 503
+
+
 if __name__ == "__main__":
     wait_for_db()
     print("  Inventory Service running on port 5003")

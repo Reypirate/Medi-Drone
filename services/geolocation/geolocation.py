@@ -239,6 +239,12 @@ def cache_stats():
     return jsonify({"cache_size": len(geocode_cache), "entries": list(geocode_cache.keys())[:20]})
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    api_status = "configured" if GOOGLE_MAPS_API_KEY else "not_configured"
+    return jsonify({"status": "healthy", "service": "geolocation", "google_maps_api": api_status, "cache_size": len(geocode_cache)})
+
+
 if __name__ == "__main__":
     if not GOOGLE_MAPS_API_KEY:
         print("  WARNING: GOOGLE_MAPS_API_KEY not set. Using fallback coordinates.")

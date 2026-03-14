@@ -164,6 +164,12 @@ def live_corridor_check():
     })
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    api_status = "configured" if OPENWEATHER_API_KEY else "not_configured"
+    return jsonify({"status": "healthy", "service": "weather", "openweather_api": api_status})
+
+
 if __name__ == "__main__":
     if not OPENWEATHER_API_KEY:
         print("  WARNING: OPENWEATHER_API_KEY not set. Weather checks will fail.")

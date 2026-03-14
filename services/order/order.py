@@ -400,6 +400,11 @@ def list_orders():
     return jsonify({"orders": list(orders.values())})
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "healthy", "service": "order", "orders_count": len(orders)})
+
+
 if __name__ == "__main__":
     init_amqp()
     print("  Order Service running on port 5001")
