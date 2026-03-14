@@ -60,17 +60,23 @@ def on_notification(channel, method, properties, body):
 
 def start_consumer():
     """Start the AMQP consumer in a background thread."""
+    print(f"  [AMQP] Starting notification consumer...")
     connection, channel = amqp_setup.get_connection()
 
     queue_name = "notification_queue"
+    print(f"  [AMQP] Declaring queue: {queue_name} (durable=True)")
     channel.queue_declare(queue=queue_name, durable=True)
+
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'notifications' with routing key 'notify.sms'")
     channel.queue_bind(exchange="notifications", queue=queue_name, routing_key="notify.sms")
+
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key 'order.failed'")
     channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.failed")
 
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=queue_name, on_message_callback=on_notification)
 
-    print("  [NOTIFICATION] Listening for messages on notification_queue...")
+    print(f"  [AMQP] Listening for notification messages on queue '{queue_name}'...")
     channel.start_consuming()
 
 

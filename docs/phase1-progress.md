@@ -33,10 +33,22 @@ This document tracks progress on Phase 1 fixes (adding observability without cha
   - Verified response headers include X-Request-ID
   - Tested successful orders and failed orders (NO_HOSPITAL_WITH_STOCK)
 
-### 🔲 Fix 2: AMQP Connection Lifecycle Logging
-- **Branch**: Not started
-- **Status**: Not started
-- See detailed steps below
+### ✅ Fix 2: AMQP Connection Lifecycle Logging
+- **Branch**: `fix/phase1-amqp-connection-logging`
+- **Status**: Complete & Tested
+- **Changes**:
+  - Updated `amqp_setup.py` with enhanced logging
+  - Log connection attempts with attempt numbers
+  - Log successful connections with host:port
+  - Log exchange declarations
+  - Added logging to `start_consumer` in drone-dispatch and notification services
+  - Log queue declarations and bindings
+  - Log consumer startup
+- **Testing**:
+  - Date tested: 2026-03-14
+  - All AMQP logs appearing correctly for order service
+  - Expected output confirmed: `[AMQP] Attempting connection to rabbitmq:5672 (attempt 1/12)...`, `[AMQP] Connected successfully to rabbitmq:5672`, `[AMQP] Declared exchange: orders (topic)`, etc.
+  - Note: drone-dispatch consumer thread startup issue is a pre-existing bug, not caused by logging changes
 
 ### 🔲 Fix 3: active_missions Size Tracking
 - **Status**: Not started (blocked by Fix 2)

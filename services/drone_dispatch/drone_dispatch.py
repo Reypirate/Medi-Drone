@@ -379,16 +379,21 @@ def on_order_confirmed(channel, method, properties, body):
 
 def start_consumer():
     """Start the AMQP consumer for order.confirmed events."""
+    print(f"  [AMQP] Starting consumer thread...")
     connection, channel = amqp_setup.get_connection()
 
     queue_name = "dispatch_queue"
+    print(f"  [AMQP] Declaring queue: {queue_name} (durable=True)")
     channel.queue_declare(queue=queue_name, durable=True)
-    channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.confirmed")
+
+    routing_key = "order.confirmed"
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key '{routing_key}'")
+    channel.queue_bind(exchange="orders", queue=queue_name, routing_key=routing_key)
 
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=queue_name, on_message_callback=on_order_confirmed)
 
-    print("  [DISPATCH] Listening for order.confirmed events...")
+    print(f"  [AMQP] Listening for order.confirmed events on queue '{queue_name}'...")
     channel.start_consuming()
 
 
