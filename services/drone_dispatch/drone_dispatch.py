@@ -3,6 +3,7 @@ import json
 import time
 import math
 import threading
+import sys
 import requests as http_requests
 import pika
 from flask import Flask, request, jsonify
@@ -21,6 +22,10 @@ ROUTE_URL = os.environ.get("ROUTE_URL", "http://route-planning:5009")
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 
+# Battery consumption: ~1% per km traveled
+BATTERY_CONSUMPTION_PER_KM = 1.0
+LOW_BATTERY_THRESHOLD = 40  # Percentage below which drones auto-charge
+
 ITEM_WEIGHTS = {
     "BLOOD-O-NEG": 0.6,
     "BLOOD-A-POS": 0.6,
@@ -36,12 +41,32 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL", 30))
 MAX_DELIVERY_DISTANCE_KM = 50
 EARTH_RADIUS_KM = 6371.0
 
+# Global lock for drone reservation to prevent race conditions
+drone_reservation_lock = threading.Lock()
+reserved_drones = set()  # Track drones that have been reserved but not yet in flight
+
 
 def haversine(lat1, lng1, lat2, lng2):
     lat1, lng1, lat2, lng2 = map(math.radians, [lat1, lng1, lat2, lng2])
     dlat, dlng = lat2 - lat1, lng2 - lng1
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+def get_depot_location():
+    """Fetch central charging depot location from drone-management service."""
+    try:
+        resp = http_requests.get(f"{DRONE_MGMT_URL}/depot", timeout=10)
+        data = resp.json()
+        return data.get("location", {})
+    except Exception as e:
+        print(f"  [DEPOT] Warning: could not fetch depot location: {e}")
+        return {"lat": 1.3644, "lng": 103.8190}  # Default to Singapore central
+
+
+def calculate_battery_consumption(distance_km):
+    """Calculate battery consumption based on distance traveled."""
+    return int(distance_km * BATTERY_CONSUMPTION_PER_KM)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +131,7 @@ def dispatch_order(order_data):
     unit_weight = ITEM_WEIGHTS.get(item_id, DEFAULT_ITEM_WEIGHT)
     payload_weight = unit_weight * quantity
 
-    # Step 2d: Check drone availability
+    # Step 2d: Check drone availability (with race condition protection)
     try:
         resp = http_requests.get(
             f"{DRONE_MGMT_URL}/drones/available",
@@ -120,8 +145,12 @@ def dispatch_order(order_data):
         cancel_order(order_id, "DRONE_SERVICE_UNAVAILABLE")
         return
 
+    # Filter out drones that are already reserved by other in-flight dispatches
+    with drone_reservation_lock:
+        available_drones = [d for d in available_drones if d["drone_id"] not in reserved_drones]
+
     if not available_drones:
-        print(f"  [DISPATCH] No drones available for {order_id}")
+        print(f"  [DISPATCH] No drones available for {order_id} (all reserved or unavailable)")
         cancel_order(order_id, "NO_DRONES_AVAILABLE")
         return
 
@@ -175,11 +204,29 @@ def dispatch_order(order_data):
     selected_drone = route_data.get("selected_drone")
     eta_minutes = route_data.get("eta_minutes")
 
-    # Step 6: Update drone status to IN_FLIGHT
+    # Step 5.5: Atomically reserve the selected drone to prevent race conditions
+    with drone_reservation_lock:
+        # Check if the drone was reserved while we were doing route planning
+        if selected_drone in reserved_drones:
+            print(f"  [DISPATCH] Drone {selected_drone} was just reserved by another order. Cancelling {order_id}")
+            cancel_order(order_id, "NO_DRONES_AVAILABLE", "All drones have been assigned to other orders.")
+            return
+
+        # Reserve the drone
+        reserved_drones.add(selected_drone)
+        print(f"  [DISPATCH] Reserved drone {selected_drone} for order {order_id}")
+
+    # Step 6: Update drone status to IN_FLIGHT with position tracking
     try:
         http_requests.patch(
             f"{DRONE_MGMT_URL}/drones/{selected_drone}/status",
-            json={"status": "IN_FLIGHT"},
+            json={
+                "status": "IN_FLIGHT",
+                "current_lat": hospital_coords["lat"],
+                "current_lng": hospital_coords["lng"],
+                "target_lat": customer_coords["lat"],
+                "target_lng": customer_coords["lng"],
+            },
             timeout=10,
         )
     except Exception as e:
@@ -202,7 +249,7 @@ def dispatch_order(order_data):
 
     print(f"  [DISPATCH] Order {order_id} dispatched: drone={selected_drone}, ETA={eta_minutes}min")
 
-    # Register active mission for Scenario 3 polling
+    # Initialize the active_missions entry with full mission details
     active_missions[order_id] = {
         "order_id": order_id,
         "drone_id": selected_drone,
@@ -211,9 +258,13 @@ def dispatch_order(order_data):
         "current_coords": hospital_coords.copy(),
         "dispatch_status": "IN_FLIGHT",
         "eta_minutes": eta_minutes,
+        "initial_eta": eta_minutes,  # Store for progress calculation
         "payload_weight": payload_weight,
     }
-    print(f"  [MISSIONS] Mission added: {order_id} | Active missions: {len(active_missions)}")
+    # Drone is now in active_missions, so we can remove it from reserved_drones
+    with drone_reservation_lock:
+        reserved_drones.discard(selected_drone)
+    print(f"  [MISSIONS] Mission fully initialized: {order_id} | Active missions: {len(active_missions)}")
 
 
 CANCEL_MESSAGES = {
@@ -228,8 +279,28 @@ CANCEL_MESSAGES = {
 
 
 def cancel_order(order_id, reason, detail_message=None):
-    """Compensating action: cancel order via Order Service."""
+    """Compensating action: cancel order via Order Service and cleanup reserved drone."""
     message = detail_message or CANCEL_MESSAGES.get(reason, f"Dispatch failed: {reason}")
+
+    # Clean up reserved drone if it was reserved
+    drone_id = None
+    if order_id in active_missions:
+        drone_id = active_missions[order_id].get("drone_id")
+        print(f"  [DISPATCH] Releasing drone {drone_id} for cancelled order {order_id}")
+        del active_missions[order_id]
+    else:
+        # Order might have been reserved but not yet added to active_missions
+        # We need to find it in reserved_drones by checking recent reservations
+        # This is tricky - we'll need to track which order reserved which drone
+        # For now, just clean up any orphaned reservations
+        pass
+
+    # Also clean up from reserved_drones if present
+    with drone_reservation_lock:
+        if drone_id and drone_id in reserved_drones:
+            reserved_drones.remove(drone_id)
+            print(f"  [DISPATCH] Removed {drone_id} from reserved_drones")
+
     try:
         http_requests.post(
             f"{ORDER_URL}/order/{order_id}/cancel",
@@ -245,18 +316,201 @@ def cancel_order(order_id, reason, detail_message=None):
 # Scenario 3: Mid-Flight Weather Polling & Rerouting
 # ---------------------------------------------------------------------------
 
+def check_and_send_low_battery_drones_to_charging():
+    """Check for drones with low battery and send them to depot for charging."""
+    try:
+        resp = http_requests.get(f"{DRONE_MGMT_URL}/drones", timeout=10)
+        drones = resp.json()
+    except Exception as e:
+        print(f"  [BATTERY] Warning: could not fetch drones: {e}")
+        return
+
+    depot_coords = get_depot_location()
+    low_battery_drones = []
+
+    for drone in drones:
+        # Skip drones that are already charging, in flight, or being processed
+        if drone.get("status") in ("CHARGING", "IN_FLIGHT", "RETURNING_TO_DEPOT", "FAULTY"):
+            continue
+
+        # Check if battery is below threshold
+        if drone.get("battery", 100) < LOW_BATTERY_THRESHOLD:
+            low_battery_drones.append(drone)
+
+    if not low_battery_drones:
+        return
+
+    print(f"  [BATTERY] Found {len(low_battery_drones)} drone(s) below {LOW_BATTERY_THRESHOLD}% battery", flush=True)
+
+    for drone in low_battery_drones:
+        drone_id = drone.get("drone_id")
+        current_battery = drone.get("battery", 0)
+
+        try:
+            # Update drone to CHARGING status at depot
+            http_requests.patch(
+                f"{DRONE_MGMT_URL}/drones/{drone_id}/status",
+                json={
+                    "status": "CHARGING",
+                    "lat": depot_coords["lat"],
+                    "lng": depot_coords["lng"],
+                    "current_lat": depot_coords["lat"],
+                    "current_lng": depot_coords["lng"],
+                    "target_lat": depot_coords["lat"],
+                    "target_lng": depot_coords["lng"],
+                },
+                timeout=10,
+            )
+            print(f"  [BATTERY] Drone {drone_id} ({current_battery}%) sent to depot for charging", flush=True)
+
+            # Add to active_missions for charging cycle tracking
+            charging_mission_id = f"{drone_id}_charging"
+            active_missions[charging_mission_id] = {
+                "order_id": charging_mission_id,
+                "drone_id": drone_id,
+                "mission_type": "LOW_BATTERY_CHARGING",
+                "destination_coords": depot_coords,
+                "dispatch_status": "CHARGING",
+                "charging_cycles": 0,
+                "original_battery": current_battery,
+            }
+            print(f"  [BATTERY] Added charging mission for {drone_id}")
+
+        except Exception as e:
+            print(f"  [BATTERY] Warning: could not send drone {drone_id} to charging: {e}")
+
+
 def poll_active_missions():
-    """Background thread that polls weather for all active in-flight missions."""
+    """Background thread that polls weather and simulates drone movement for active missions."""
     print(f"  [MISSIONS] Polling thread started | Active missions: {len(active_missions)}")
     while True:
         time.sleep(POLL_INTERVAL_SECONDS)
-        print(f"  [MISSIONS] Polling {len(active_missions)} active missions...")
+
+        # First, check for low battery drones and send them to charging
+        check_and_send_low_battery_drones_to_charging()
+
+        print(f"  [MISSIONS] Polling {len(active_missions)} active missions...", flush=True)
 
         for order_id, mission in list(active_missions.items()):
+            # Handle return-to-depot missions
+            if mission.get("mission_type") == "RETURN_TO_DEPOT":
+                # Simulate return trip
+                if mission.get("return_cycles", 0) >= 1:
+                    # Drone has arrived at depot - start charging
+                    if mission.get("charging", False):
+                        # Already charging - check if charging complete
+                        if mission.get("charging_cycles", 0) >= 2:
+                            # Charging complete - make drone available again
+                            try:
+                                http_requests.patch(
+                                    f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                                    json={"status": "AVAILABLE", "battery": 100, "lat": mission["destination_coords"]["lat"],
+                                          "lng": mission["destination_coords"]["lng"]},
+                                    timeout=10,
+                                )
+                                print(f"  [CHARGING] Drone {mission['drone_id']} fully charged. Now AVAILABLE.")
+                            except Exception as e:
+                                print(f"  [CHARGING] Warning: could not update drone status: {e}")
+                            del active_missions[order_id]
+                            print(f"  [MISSIONS] Charging mission completed: {order_id} | Active missions: {len(active_missions)}")
+                        else:
+                            mission["charging_cycles"] = mission.get("charging_cycles", 0) + 1
+                            print(f"  [CHARGING] Drone {mission['drone_id']} charging... cycle {mission.get('charging_cycles', 0)}/2")
+                    else:
+                        # Start charging
+                        try:
+                            http_requests.patch(
+                                f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                                json={"status": "CHARGING", "lat": mission["destination_coords"]["lat"],
+                                      "lng": mission["destination_coords"]["lng"]},
+                                timeout=10,
+                            )
+                            print(f"  [RETURN] Drone {mission['drone_id']} arrived at depot. Now CHARGING.")
+                            mission["charging"] = True
+                        except Exception as e:
+                            print(f"  [RETURN] Warning: could not update drone status: {e}")
+                            del active_missions[order_id]
+                else:
+                    mission["return_cycles"] = mission.get("return_cycles", 0) + 1
+                    print(f"  [RETURN] Drone {mission['drone_id']} returning to depot... cycle {mission['return_cycles']}/1")
+                continue
+
+            # Handle low battery charging missions (drone already at depot)
+            if mission.get("mission_type") == "LOW_BATTERY_CHARGING":
+                if mission.get("charging_cycles", 0) >= 2:
+                    # Charging complete - make drone available again
+                    try:
+                        http_requests.patch(
+                            f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                            json={
+                                "status": "AVAILABLE",
+                                "battery": 100,
+                                "lat": mission["destination_coords"]["lat"],
+                                "lng": mission["destination_coords"]["lng"]
+                            },
+                            timeout=10,
+                        )
+                        print(f"  [CHARGING] Drone {mission['drone_id']} fully charged from low battery ({mission.get('original_battery', 0)}%). Now AVAILABLE.")
+                    except Exception as e:
+                        print(f"  [CHARGING] Warning: could not update drone status: {e}")
+                    del active_missions[order_id]
+                    print(f"  [MISSIONS] Low battery charging completed: {order_id} | Active missions: {len(active_missions)}")
+                else:
+                    mission["charging_cycles"] = mission.get("charging_cycles", 0) + 1
+                    print(f"  [CHARGING] Drone {mission['drone_id']} charging from low battery... cycle {mission.get('charging_cycles', 0)}/2")
+                continue
+
             if mission["dispatch_status"] not in ("IN_FLIGHT", "REROUTED_IN_FLIGHT"):
                 continue
 
-            print(f"  [POLL] Checking weather for mission {order_id} (drone {mission['drone_id']})")
+            # Simulate drone movement and battery consumption
+            current_eta = mission.get("eta_minutes", 0)
+            if current_eta <= 0:
+                # Delivery complete!
+                print(f"  [DELIVERY] ETA reached zero for {order_id}. Completing delivery...")
+                handle_delivery_completion(order_id, mission)
+                continue
+
+            # Decrease ETA by poll interval (30 seconds = 0.5 minutes)
+            mission["eta_minutes"] = max(0, current_eta - (POLL_INTERVAL_SECONDS / 60))
+
+            # Update order service with current ETA
+            try:
+                http_requests.post(
+                    f"{ORDER_URL}/dispatch/update",
+                    json={
+                        "order_id": order_id,
+                        "drone_id": mission["drone_id"],
+                        "dispatch_status": mission["dispatch_status"],
+                        "eta_minutes": mission["eta_minutes"],
+                    },
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"  [POLL] Warning: could not update order service ETA: {e}")
+
+            # Update drone position (simulate movement towards destination)
+            if "current_coords" in mission and "customer_coords" in mission:
+                progress_fraction = 1 - (mission["eta_minutes"] / max(mission.get("initial_eta", mission["eta_minutes"] + 1), 1))
+                new_lat = mission["hospital_coords"]["lat"] + progress_fraction * (
+                    mission["customer_coords"]["lat"] - mission["hospital_coords"]["lat"]
+                )
+                new_lng = mission["hospital_coords"]["lng"] + progress_fraction * (
+                    mission["customer_coords"]["lng"] - mission["hospital_coords"]["lng"]
+                )
+                mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
+
+                # Update position in drone management
+                try:
+                    http_requests.patch(
+                        f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/position",
+                        json={"lat": new_lat, "lng": new_lng},
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"  [POLL] Warning: could not update drone position: {e}")
+
+            print(f"  [POLL] Checking weather for mission {order_id} (drone {mission['drone_id']}, ETA: {mission['eta_minutes']:.1f}min)")
 
             try:
                 resp = http_requests.post(
@@ -362,6 +616,89 @@ def handle_mission_abort(order_id, mission):
     del active_missions[order_id]
     print(f"  [ABORT] Mission {order_id} aborted. Drone {mission['drone_id']} returning to origin.")
     print(f"  [MISSIONS] Mission aborted: {order_id} | Active missions: {len(active_missions)}")
+
+
+def handle_delivery_completion(order_id, mission):
+    """Handle successful delivery: complete order and return drone to depot."""
+    print(f"  [DELIVERY] Order {order_id} delivered successfully. Processing completion...")
+
+    # Get depot location
+    depot_coords = get_depot_location()
+
+    # Calculate battery consumed during flight
+    flight_distance = haversine(
+        mission["hospital_coords"]["lat"], mission["hospital_coords"]["lng"],
+        mission["customer_coords"]["lat"], mission["customer_coords"]["lng"]
+    )
+    battery_consumed = calculate_battery_consumption(flight_distance)
+
+    # Calculate distance to depot and additional battery needed
+    distance_to_depot = haversine(
+        mission["customer_coords"]["lat"], mission["customer_coords"]["lng"],
+        depot_coords["lat"], depot_coords["lng"]
+    )
+    return_battery = calculate_battery_consumption(distance_to_depot)
+    total_consumed = battery_consumed + return_battery
+
+    # Get current drone battery
+    try:
+        resp = http_requests.get(f"{DRONE_MGMT_URL}/drones", timeout=10)
+        drones_data = resp.json()
+        drone = next((d for d in drones_data if d["drone_id"] == mission["drone_id"]), None)
+        current_battery = drone.get("battery", 100) if drone else 100
+        final_battery = max(10, current_battery - total_consumed)  # Minimum 10%
+    except Exception as e:
+        print(f"  [DELIVERY] Warning: could not fetch drone battery: {e}")
+        final_battery = 50  # Conservative default
+
+    # Update drone status to RETURNING_TO_DEPOT with reduced battery
+    try:
+        http_requests.patch(
+            f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+            json={
+                "status": "RETURNING_TO_DEPOT",
+                "battery": final_battery,
+                "current_lat": mission["customer_coords"]["lat"],
+                "current_lng": mission["customer_coords"]["lng"],
+                "target_lat": depot_coords["lat"],
+                "target_lng": depot_coords["lng"],
+            },
+            timeout=10,
+        )
+        print(f"  [DELIVERY] Drone {mission['drone_id']} returning to depot (battery: {final_battery}%)")
+    except Exception as e:
+        print(f"  [DELIVERY] Warning: could not update drone status: {e}")
+
+    # Complete the order
+    try:
+        http_requests.post(
+            f"{ORDER_URL}/dispatch/complete",
+            json={
+                "order_id": order_id,
+                "drone_id": mission["drone_id"],
+                "status": "DELIVERED",
+            },
+            timeout=10,
+        )
+        print(f"  [DELIVERY] Order {order_id} marked as DELIVERED")
+    except Exception as e:
+        print(f"  [DELIVERY] Warning: could not complete order: {e}")
+
+    # Schedule charging at depot (after return trip)
+    active_missions[f"{order_id}_return"] = {
+        "order_id": f"{order_id}_return",
+        "drone_id": mission["drone_id"],
+        "mission_type": "RETURN_TO_DEPOT",
+        "current_coords": mission["customer_coords"].copy(),
+        "destination_coords": depot_coords,
+        "dispatch_status": "RETURNING_TO_DEPOT",
+        "eta_minutes": int(distance_to_depot / 0.5),  # Assume 30km/h
+    }
+    print(f"  [MISSIONS] Return mission added: {order_id}_return | Active missions: {len(active_missions)}")
+
+    # Remove original delivery mission
+    del active_missions[order_id]
+    print(f"  [MISSIONS] Delivery mission completed: {order_id} | Active missions: {len(active_missions)}")
 
 
 # ---------------------------------------------------------------------------
@@ -512,4 +849,4 @@ if __name__ == "__main__":
     poller_thread.start()
 
     print("  Drone Dispatch Service running on port 5002")
-    app.run(host="0.0.0.0", port=5002, debug=True)
+    app.run(host="0.0.0.0", port=5002, debug=False)

@@ -241,6 +241,15 @@ def create_order():
         "urgency_level": urgency_level,
         "customer_address": customer_address,
         "customer_coords": customer_coords,
+        "message": f"Order confirmed from {hospital_name}. Awaiting drone assignment.",
+    })
+
+    publish_message("notifications", "notify.sms", {
+        "order_id": order_id,
+        "hospital_id": hospital_id,
+        "item_id": item_id,
+        "event_type": "ORDER_CONFIRMED",
+        "message": f"Your order {order_id} has been confirmed from {hospital_name}. Waiting for drone dispatch.",
     })
 
     return jsonify({
@@ -387,6 +396,46 @@ def dispatch_failure():
     })
 
 
+@app.route("/dispatch/complete", methods=["POST"])
+def dispatch_complete():
+    """Receives delivery completion from Drone Dispatch - marks order as DELIVERED."""
+    data = request.get_json()
+    order_id = data.get("order_id")
+    drone_id = data.get("drone_id")
+
+    order = orders.get(order_id)
+    if not order:
+        return jsonify({"error": "Order not found", "order_id": order_id}), 404
+
+    order["status"] = "DELIVERED"
+    order["dispatch_status"] = "DELIVERED"
+    order["drone_id"] = drone_id or order.get("drone_id")
+
+    # Publish delivery notification via both exchanges
+    publish_message("orders", "order.delivered", {
+        "order_id": order_id,
+        "drone_id": order["drone_id"],
+        "hospital_id": order.get("hospital_id"),
+        "item_id": order.get("item_id"),
+        "message": f"Order {order_id} successfully delivered by drone {order['drone_id']}.",
+    })
+
+    publish_message("notifications", "notify.sms", {
+        "order_id": order_id,
+        "drone_id": order["drone_id"],
+        "hospital_id": order.get("hospital_id"),
+        "item_id": order.get("item_id"),
+        "event_type": "ORDER_DELIVERED",
+        "message": f"Your order {order_id} has been successfully delivered by drone {order['drone_id']}!",
+    })
+
+    return jsonify({
+        "order_id": order_id,
+        "status": "DELIVERED",
+        "drone_id": order["drone_id"],
+    })
+
+
 @app.route("/order/<order_id>", methods=["GET"])
 def get_order(order_id):
     order = orders.get(order_id)
@@ -397,7 +446,45 @@ def get_order(order_id):
 
 @app.route("/orders", methods=["GET"])
 def list_orders():
-    return jsonify({"orders": list(orders.values())})
+    status_filter = request.args.get("status")  # active, cancelled, completed
+
+    filtered_orders = list(orders.values())
+
+    if status_filter:
+        if status_filter == "active":
+            filtered_orders = [o for o in filtered_orders if o.get("status") in ("DISPATCHED", "IN_TRANSIT")]
+        elif status_filter == "cancelled":
+            filtered_orders = [o for o in filtered_orders if o.get("status", "").startswith("CANCELLED")]
+        elif status_filter == "completed":
+            filtered_orders = [o for o in filtered_orders if o.get("status") == "DELIVERED"]
+
+    return jsonify({"orders": filtered_orders})
+
+
+@app.route("/order/<order_id>", methods=["DELETE"])
+def delete_order(order_id):
+    """Delete an order (only allowed for cancelled or completed orders)."""
+    order = orders.get(order_id)
+    if not order:
+        return jsonify({"error": "Order not found", "order_id": order_id}), 404
+
+    current_status = order.get("status")
+
+    # Cannot delete active orders
+    if current_status in ("DISPATCHED", "IN_TRANSIT", "CONFIRMED", "PENDING"):
+        return jsonify({
+            "error": "Cannot delete active order",
+            "order_id": order_id,
+            "status": current_status,
+            "message": "Only cancelled or completed orders can be deleted"
+        }), 400
+
+    del orders[order_id]
+    return jsonify({
+        "order_id": order_id,
+        "status": "DELETED",
+        "message": f"Order {order_id} has been deleted"
+    })
 
 
 @app.route("/health", methods=["GET"])

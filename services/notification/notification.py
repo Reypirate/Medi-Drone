@@ -43,11 +43,25 @@ def on_notification(channel, method, properties, body):
         data = json.loads(body)
         print(f"  [NOTIFICATION] Received: {json.dumps(data, indent=2)}")
 
+        # For direct SMS notifications (from notify.sms)
         message_body = data.get("message", "You have a new notification from Medi-Drone.")
         to_number = data.get("phone_number", TWILIO_TO)
-
         order_id = data.get("order_id", "N/A")
         event_type = data.get("event_type", "GENERAL")
+
+        # For order.confirmed events from orders exchange
+        routing_key = method.routing_key if hasattr(method, 'routing_key') else ""
+        if routing_key == "order.confirmed":
+            hospital_name = data.get("hospital_name", data.get("hospital_id", "Hospital"))
+            message_body = f"Order confirmed from {hospital_name}. Drone assignment pending."
+            event_type = "ORDER_CONFIRMED"
+        elif routing_key == "order.failed":
+            message_body = data.get("message", "Order cancelled. Reserved stock has been released.")
+            event_type = "ORDER_CANCELLED"
+        elif routing_key == "order.delivered":
+            drone_id = data.get("drone_id", "N/A")
+            message_body = f"Successfully delivered by drone {drone_id}."
+            event_type = "ORDER_DELIVERED"
 
         sms_body = f"[Medi-Drone | {event_type}] Order {order_id}: {message_body}"
         send_sms(to_number, sms_body)
@@ -70,8 +84,14 @@ def start_consumer():
     print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'notifications' with routing key 'notify.sms'")
     channel.queue_bind(exchange="notifications", queue=queue_name, routing_key="notify.sms")
 
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key 'order.confirmed'")
+    channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.confirmed")
+
     print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key 'order.failed'")
     channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.failed")
+
+    print(f"  [AMQP] Binding queue '{queue_name}' to exchange 'orders' with routing key 'order.delivered'")
+    channel.queue_bind(exchange="orders", queue=queue_name, routing_key="order.delivered")
 
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=queue_name, on_message_callback=on_notification)

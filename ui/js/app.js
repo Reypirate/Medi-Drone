@@ -5,6 +5,8 @@ let pollInterval = null;
 let addressMode = "postalcode";
 let validatedAddress = null;
 let addressConfirmed = false;
+let currentOrderTab = "active";
+let deletePendingOrderId = null;
 
 // ── Urgency selector ──────────────────────────────────────────────
 
@@ -53,6 +55,58 @@ function setAddressMode(mode) {
     document.getElementById("fields-postalcode").classList.toggle("hidden", mode !== "postalcode");
     document.getElementById("fields-latlng").classList.toggle("hidden", mode !== "latlng");
     clearAddressValidation();
+}
+
+// ── Current location ───────────────────────────────────────────────
+
+async function getCurrentLocation() {
+    const btn = document.getElementById("location-btn");
+    btn.disabled = true;
+    btn.textContent = "Getting location...";
+
+    if (!navigator.geolocation) {
+        addLog("Geolocation is not supported by your browser", "error");
+        btn.disabled = false;
+        btn.innerHTML = "&#128205; Use My Current Location";
+        return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+        async (position) => {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+
+            // Switch to lat/lng mode and fill in the coordinates
+            setAddressMode("latlng");
+            document.getElementById("input-lat").value = lat.toFixed(6);
+            document.getElementById("input-lng").value = lng.toFixed(6);
+
+            addLog(`Current location: ${lat.toFixed(4)}, ${lng.toFixed(4)}`, "info");
+
+            // Auto-check the address
+            await checkAddress();
+
+            btn.disabled = false;
+            btn.innerHTML = "&#128205; Use My Current Location";
+        },
+        (error) => {
+            let errorMsg = "Unable to get location";
+            switch (error.code) {
+                case error.PERMISSION_DENIED:
+                    errorMsg = "Location access denied. Please enable location services.";
+                    break;
+                case error.POSITION_UNAVAILABLE:
+                    errorMsg = "Location information unavailable.";
+                    break;
+                case error.TIMEOUT:
+                    errorMsg = "Location request timed out.";
+                    break;
+            }
+            addLog(errorMsg, "error");
+            btn.disabled = false;
+            btn.innerHTML = "&#128205; Use My Current Location";
+        }
+    );
 }
 
 // ── Address validation ────────────────────────────────────────────
@@ -280,31 +334,188 @@ async function submitOrder() {
     }
 }
 
+// ── Order tabs ─────────────────────────────────────────────────────
+
+function setOrderTab(tab) {
+    currentOrderTab = tab;
+    document.getElementById("tab-active").classList.toggle("active", tab === "active");
+    document.getElementById("tab-cancelled").classList.toggle("active", tab === "cancelled");
+    document.getElementById("tab-completed").classList.toggle("active", tab === "completed");
+
+    // Show Delete All button only for cancelled and completed tabs
+    const deleteAllBtn = document.getElementById("delete-all-btn");
+    if (tab === "cancelled" || tab === "completed") {
+        deleteAllBtn.style.display = "inline-block";
+    } else {
+        deleteAllBtn.style.display = "none";
+    }
+
+    refreshOrders();
+}
+
+// ── Delete order with confirmation ───────────────────────────────────
+
+function showDeleteDialog(orderId, orderInfo) {
+    deletePendingOrderId = orderId;
+    const messageEl = document.getElementById("confirm-message");
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+
+    messageEl.textContent = `Are you sure you want to delete order ${orderId}? This action cannot be undone.`;
+    confirmBtn.onclick = () => confirmDeleteOrder();
+    document.getElementById("confirm-dialog").classList.remove("hidden");
+}
+
+function closeConfirmDialog() {
+    deletePendingOrderId = null;
+    deleteAllMode = false;
+    document.getElementById("confirm-dialog").classList.add("hidden");
+}
+
+async function confirmDeleteOrder() {
+    if (!deletePendingOrderId) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/order/order/${deletePendingOrderId}`, {
+            method: "DELETE"
+        });
+
+        if (resp.ok) {
+            addLog(`Order ${deletePendingOrderId} deleted`, "success");
+            refreshOrders();
+        } else {
+            const data = await resp.json();
+            addLog(`Delete failed: ${data.error || data.message}`, "error");
+        }
+    } catch (e) {
+        addLog(`Error deleting order: ${e.message}`, "error");
+    } finally {
+        closeConfirmDialog();
+    }
+}
+
+// ── Delete all orders in current tab ───────────────────────────────
+
+let deleteAllMode = false;
+
+function deleteAllOrders() {
+    deleteAllMode = true;
+    const messageEl = document.getElementById("confirm-message");
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+
+    const tabName = currentOrderTab === "cancelled" ? "cancelled" : "completed";
+    messageEl.textContent = `Are you sure you want to delete ALL ${tabName} orders? This action cannot be undone.`;
+    confirmBtn.onclick = () => confirmDeleteAllOrders();
+    document.getElementById("confirm-dialog").classList.remove("hidden");
+}
+
+async function confirmDeleteAllOrders() {
+    try {
+        let url = `${API_BASE}/api/order/orders`;
+        if (currentOrderTab !== "active") {
+            url += `?status=${currentOrderTab}`;
+        }
+
+        const resp = await fetch(url);
+        const data = await resp.json();
+        let orders = data.orders || [];
+
+        if (currentOrderTab === "active") {
+            orders = orders.filter(o => o.status === "DISPATCHED" || o.status === "IN_TRANSIT");
+        }
+
+        if (orders.length === 0) {
+            addLog(`No ${currentOrderTab} orders to delete`, "info");
+            closeConfirmDialog();
+            return;
+        }
+
+        // Delete all orders in parallel
+        const deletePromises = orders.map(async (order) => {
+            try {
+                const deleteResp = await fetch(`${API_BASE}/api/order/order/${order.order_id}`, {
+                    method: "DELETE"
+                });
+                return { orderId: order.order_id, success: deleteResp.ok };
+            } catch (e) {
+                return { orderId: order.order_id, success: false, error: e.message };
+            }
+        });
+
+        const results = await Promise.all(deletePromises);
+        const successCount = results.filter(r => r.success).length;
+        const failCount = results.length - successCount;
+
+        if (failCount === 0) {
+            addLog(`Deleted ${successCount} ${currentOrderTab} order(s)`, "success");
+        } else {
+            addLog(`Deleted ${successCount} order(s), ${failCount} failed`, "warn");
+        }
+
+        refreshOrders();
+    } catch (e) {
+        addLog(`Error deleting orders: ${e.message}`, "error");
+    } finally {
+        deleteAllMode = false;
+        closeConfirmDialog();
+    }
+}
+
 // ── Refresh orders ────────────────────────────────────────────────
 
 async function refreshOrders() {
     try {
-        const resp = await fetch(`${API_BASE}/api/orders/orders`);
+        let url = `${API_BASE}/api/order/orders`;
+        if (currentOrderTab !== "active") {
+            url += `?status=${currentOrderTab}`;
+        }
+
+        const resp = await fetch(url);
         const data = await resp.json();
-        const orders = data.orders || [];
+        let orders = data.orders || [];
+
+        // For active tab, also filter by status
+        if (currentOrderTab === "active") {
+            orders = orders.filter(o => ["CONFIRMED", "DISPATCHED", "IN_TRANSIT"].includes(o.status));
+        }
 
         const list = document.getElementById("orders-list");
 
         if (orders.length === 0) {
-            list.innerHTML = '<div class="empty-state">No orders yet. Submit a delivery request to get started.</div>';
+            const emptyMessages = {
+                active: "No active orders. Submit a delivery request to get started.",
+                cancelled: "No cancelled orders.",
+                completed: "No completed orders yet."
+            };
+            list.innerHTML = `<div class="empty-state">${emptyMessages[currentOrderTab]}</div>`;
             return;
         }
 
-        const activeCount = orders.filter(o => ["CONFIRMED", "DISPATCHED", "IN_TRANSIT"].includes(o.status)).length;
-        document.getElementById("active-count").textContent = `${activeCount} active mission${activeCount !== 1 ? "s" : ""}`;
+        // Update active count in header
+        if (currentOrderTab === "active") {
+            document.getElementById("active-count").textContent = `${orders.length} active mission${orders.length !== 1 ? "s" : ""}`;
+        }
+
+        const canDelete = currentOrderTab !== "active";
 
         list.innerHTML = orders.reverse().map(o => {
             const badgeClass = getBadgeClass(o.status);
+
+            // Display ETA countdown for dispatched orders
+            let etaDisplay = "";
+            if (o.eta_minutes !== undefined && o.eta_minutes !== null) {
+                const eta = Math.max(0, o.eta_minutes);
+                etaDisplay = `<div>ETA: <span class="order-detail-value" style="color:${eta <= 5 ? '#f87171' : eta <= 10 ? '#fbbf24' : '#4ade80'}">${eta} min</span></div>`;
+                if (eta <= 0 && o.status !== "DELIVERED") {
+                    etaDisplay += `<div style="color:#4ade80; font-size:11px; grid-column:1/-1;">&#10003; Delivered!</div>`;
+                }
+            }
+
             return `
                 <div class="order-card">
                     <div class="order-header">
                         <span class="order-id">${o.order_id}</span>
                         <span class="badge ${badgeClass}">${o.status}</span>
+                        ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
                     </div>
                     <div class="order-details">
                         <div>Hospital: <span class="order-detail-value">${o.hospital_name || o.hospital_id || "Auto"}</span></div>
@@ -312,7 +523,7 @@ async function refreshOrders() {
                         <div>Qty: <span class="order-detail-value">${o.quantity}</span></div>
                         <div>Urgency: <span class="order-detail-value">${o.urgency_level}</span></div>
                         ${o.drone_id ? `<div>Drone: <span class="order-detail-value">${o.drone_id}</span></div>` : ""}
-                        ${o.eta_minutes ? `<div>ETA: <span class="order-detail-value">${o.eta_minutes} min</span></div>` : ""}
+                        ${etaDisplay}
                         ${o.dispatch_status ? `<div>Dispatch: <span class="order-detail-value">${o.dispatch_status}</span></div>` : ""}
                         ${o.route_id ? `<div>Route: <span class="order-detail-value">${o.route_id}</span></div>` : ""}
                         ${o.cancel_message ? `<div style="grid-column:1/-1; margin-top:4px; padding:8px; background:rgba(239,68,68,0.08); border-radius:6px; color:#f87171; font-size:12px;">${o.cancel_message}</div>` : ""}
@@ -331,6 +542,7 @@ function getBadgeClass(status) {
     if (s === "CONFIRMED") return "badge-confirmed";
     if (s === "DISPATCHED") return "badge-dispatched";
     if (s === "IN_TRANSIT") return "badge-transit";
+    if (s === "DELIVERED") return "badge-delivered";
     if (s.includes("REROUTE")) return "badge-rerouted";
     if (s.includes("FAIL") || s.includes("ERROR")) return "badge-failed";
     if (s.includes("CANCEL")) return "badge-cancelled";

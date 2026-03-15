@@ -7,11 +7,18 @@ services:
       - name: order-routes
         paths:
           - /api/order
-          - /api/orders
         strip_path: true
         methods:
           - GET
           - POST
+          - DELETE
+          - OPTIONS
+      - name: order-list-routes
+        paths:
+          - /api/orders
+        strip_path: true
+        methods:
+          - GET
           - OPTIONS
 
   - name: dispatch-service

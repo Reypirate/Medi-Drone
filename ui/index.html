@@ -200,6 +200,22 @@
         .check-btn:hover { background: #475569; }
         .check-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+        .location-btn {
+            width: 100%;
+            padding: 10px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 8px;
+        }
+        .location-btn:hover { background: #2563eb; }
+        .location-btn:disabled { background: #475569; cursor: not-allowed; }
+
         .address-preview {
             margin-top: 10px;
             padding: 12px;
@@ -246,6 +262,109 @@
         }
 
         .preview-grid .val { color: #e2e8f0; }
+
+        .order-tabs {
+            display: flex;
+            gap: 4px;
+            background: #0f172a;
+            border-radius: 8px;
+            padding: 3px;
+            margin-bottom: 16px;
+        }
+
+        .order-tab {
+            flex: 1;
+            padding: 8px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 6px;
+            color: #94a3b8;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .order-tab:hover { color: #e2e8f0; }
+        .order-tab.active { background: #334155; color: #f8fafc; }
+
+        .delete-btn {
+            padding: 4px 10px;
+            background: rgba(239,68,68,0.15);
+            border: 1px solid rgba(239,68,68,0.4);
+            border-radius: 6px;
+            color: #f87171;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .delete-btn:hover { background: rgba(239,68,68,0.25); }
+        .delete-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+        .confirm-dialog {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .confirm-dialog.hidden { display: none; }
+
+        .confirm-box {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .confirm-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f8fafc;
+            margin-bottom: 12px;
+        }
+
+        .confirm-message {
+            font-size: 14px;
+            color: #94a3b8;
+            margin-bottom: 20px;
+        }
+
+        .confirm-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+        }
+
+        .confirm-btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+        }
+
+        .confirm-btn.cancel {
+            background: #334155;
+            color: #e2e8f0;
+        }
+        .confirm-btn.cancel:hover { background: #475569; }
+
+        .confirm-btn.confirm {
+            background: #ef4444;
+            color: white;
+        }
+        .confirm-btn.confirm:hover { background: #dc2626; }
 
         .gmaps-link {
             display: inline-block;
@@ -310,6 +429,7 @@
         .badge-cancelled { background: rgba(239,68,68,0.15); color: #f87171; }
         .badge-rerouted { background: rgba(245,158,11,0.15); color: #fbbf24; }
         .badge-pending { background: rgba(148,163,184,0.15); color: #94a3b8; }
+        .badge-delivered { background: rgba(34,197,94,0.15); color: #4ade80; }
 
         .order-details {
             display: grid;
@@ -599,6 +719,9 @@
                 </div>
 
                 <button class="check-btn" id="check-btn" onclick="checkAddress()">Check Address</button>
+                <button class="location-btn" id="location-btn" onclick="getCurrentLocation()">
+                    &#128205; Use My Current Location
+                </button>
                 <div class="address-preview" id="address-preview"></div>
             </div>
 
@@ -627,8 +750,16 @@
         <div class="right-column">
             <div class="panel">
                 <div class="panel-title">
-                    Active Orders & Drone Tracking
-                    <button onclick="refreshOrders()" style="margin-left:auto; padding:6px 14px; background:#334155; border:none; border-radius:6px; color:#e2e8f0; cursor:pointer; font-size:12px;">Refresh</button>
+                    Orders
+                    <div style="display:flex; gap:8px; margin-left:auto;">
+                        <button id="delete-all-btn" onclick="deleteAllOrders()" style="display:none; padding:6px 14px; background:rgba(239,68,68,0.2); border:1px solid rgba(239,68,68,0.5); border-radius:6px; color:#f87171; cursor:pointer; font-size:12px;">Delete All</button>
+                        <button onclick="refreshOrders()" style="padding:6px 14px; background:#334155; border:none; border-radius:6px; color:#e2e8f0; cursor:pointer; font-size:12px;">Refresh</button>
+                    </div>
+                </div>
+                <div class="order-tabs">
+                    <button class="order-tab active" id="tab-active" onclick="setOrderTab('active')">Active</button>
+                    <button class="order-tab" id="tab-cancelled" onclick="setOrderTab('cancelled')">Cancelled</button>
+                    <button class="order-tab" id="tab-completed" onclick="setOrderTab('completed')">Completed</button>
                 </div>
                 <div class="orders-list" id="orders-list">
                     <div class="empty-state">No orders yet. Submit a delivery request to get started.</div>
@@ -677,6 +808,17 @@
                 <div id="drone-list">
                     <div class="empty-state">Loading drone fleet data...</div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="confirm-dialog hidden" id="confirm-dialog">
+        <div class="confirm-box">
+            <div class="confirm-title">Delete Order?</div>
+            <div class="confirm-message" id="confirm-message">Are you sure you want to delete this order? This action cannot be undone.</div>
+            <div class="confirm-actions">
+                <button class="confirm-btn cancel" onclick="closeConfirmDialog()">Cancel</button>
+                <button class="confirm-btn confirm" id="confirm-delete-btn">Delete</button>
             </div>
         </div>
     </div>
