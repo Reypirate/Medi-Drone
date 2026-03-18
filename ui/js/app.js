@@ -573,9 +573,10 @@ async function refreshNotifications() {
 
 let searchItemsLoaded = false;
 let hospitalNameCache = null;
+let selectedMissionId = null;
 
 function navigateTo(page) {
-    const pages = ["dashboard", "inventory", "drones"];
+    const pages = ["dashboard", "inventory", "drones", "simulation"];
     pages.forEach(p => {
         document.getElementById(`page-${p}`).classList.toggle("page-hidden", p !== page);
         document.getElementById(`nav-${p}`).classList.toggle("active", p === page);
@@ -583,6 +584,10 @@ function navigateTo(page) {
 
     if (page === "inventory" && !searchItemsLoaded) loadSearchItems();
     if (page === "drones") loadDrones();
+    if (page === "simulation") {
+        refreshSimulationStatus();
+        refreshActiveMissions();
+    }
 }
 
 async function loadSearchItems() {
@@ -804,3 +809,299 @@ document.addEventListener("DOMContentLoaded", () => {
     updateSubmitButton();
     addLog("Medi-Drone UI initialized", "info");
 });
+
+// ── Weather Simulation ──────────────────────────────────────────────
+
+const WEATHER_URL = API_BASE;  // Use Kong gateway to avoid CORS issues
+const DISPATCH_URL = API_BASE;  // Use Kong gateway to avoid CORS issues
+
+function addSimLog(message) {
+    const area = document.getElementById("sim-log");
+    if (area.querySelector(".empty-state")) area.innerHTML = "";
+
+    const time = new Date().toLocaleTimeString();
+    const entry = document.createElement("div");
+    entry.className = "notif-entry";
+    entry.innerHTML = `<span class="notif-time">[${time}]</span> <span class="notif-msg">${message}</span>`;
+    area.prepend(entry);
+}
+
+async function refreshSimulationStatus() {
+    try {
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/status`);
+        const data = await resp.json();
+
+        const statusEl = document.getElementById("sim-status-content");
+        if (data.simulation_enabled) {
+            const config = data.config;
+            statusEl.innerHTML = `
+                <div style="color:#f87171;">&#9888; Simulation <strong>ENABLED</strong></div>
+                <div style="margin-top:8px; font-size:12px;">
+                    <div>Force Unsafe: ${config.force_unsafe ? "Yes" : "No"}</div>
+                    <div>Conditions: ${config.unsafe_reason ? config.unsafe_reason.join(", ") : "None"}</div>
+                    <div>Wind Speed: ${config.wind_speed_kmh} km/h</div>
+                    <div>Rainfall: ${config.rain_mm} mm/h</div>
+                </div>
+            `;
+        } else {
+            statusEl.innerHTML = `
+                <div style="color:#4ade80;">&#10003; Simulation <strong>DISABLED</strong></div>
+                <div style="margin-top:8px; font-size:12px; color:#94a3b8;">Weather service using real API data or dev mode</div>
+            `;
+        }
+    } catch (e) {
+        document.getElementById("sim-status-content").innerHTML = `
+            <div style="color:#f87171;">Failed to fetch simulation status: ${e.message}</div>
+        `;
+    }
+}
+
+async function enableSimulation() {
+    const unsafe = document.getElementById("sim-unsafe").checked;
+    const highWind = document.getElementById("sim-high-wind").checked;
+    const heavyRain = document.getElementById("sim-heavy-rain").checked;
+    const thunderstorm = document.getElementById("sim-thunderstorm").checked;
+    const tornado = document.getElementById("sim-tornado").checked;
+    const windSpeed = parseFloat(document.getElementById("sim-wind-speed").value) || 65;
+    const rainMm = parseFloat(document.getElementById("sim-rain-mm").value) || 15;
+
+    const reasons = [];
+    if (highWind) reasons.push("HIGH_WIND");
+    if (heavyRain) reasons.push("HEAVY_RAIN");
+    if (thunderstorm) reasons.push("THUNDERSTORM");
+    if (tornado) reasons.push("TORNADO");
+
+    const payload = {
+        force_unsafe: unsafe,
+        unsafe_reason: reasons.length > 0 ? reasons : ["HIGH_WIND"],
+        wind_speed_kmh: windSpeed,
+        rain_mm: rainMm,
+        hazard_zones: window.hazardZones || []
+    };
+
+    try {
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/enable`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog(`Simulation ENABLED: ${data.config.unsafe_reason.join(", ")} (${data.config.wind_speed_kmh} km/h wind)`);
+            refreshSimulationStatus();
+        } else {
+            addSimLog(`Failed to enable simulation: ${data.message || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`Error enabling simulation: ${e.message}`);
+    }
+}
+
+async function disableSimulation() {
+    try {
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/disable`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog("Simulation DISABLED - weather service using normal mode");
+            refreshSimulationStatus();
+        } else {
+            addSimLog(`Failed to disable simulation: ${data.message || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`Error disabling simulation: ${e.message}`);
+    }
+}
+
+async function refreshActiveMissions() {
+    try {
+        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/missions`);
+        const data = await resp.json();
+        const missions = data.active_missions || [];
+
+        const listEl = document.getElementById("active-missions-list");
+
+        if (missions.length === 0) {
+            listEl.innerHTML = '<div class="empty-state" style="padding:16px;">No active missions. Create an order first to test weather cancellation.</div>';
+            selectedMissionId = null;
+            return;
+        }
+
+        listEl.innerHTML = `
+            <div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Select a mission to test weather poll:</div>
+            ${missions.map(m => `
+                <div style="padding:10px; background:#0f172a; border:1px solid #334155; border-radius:6px; margin-bottom:8px; cursor:pointer; ${selectedMissionId === m.order_id ? 'border-color:#3b82f6; background:rgba(59,130,246,0.1);' : ''}"
+                     onclick="selectMission('${m.order_id}')" id="mission-${m.order_id}">
+                    <div style="font-weight:600; color:#f8fafc;">${m.order_id}</div>
+                    <div style="font-size:12px; color:#94a3b8; margin-top:4px;">
+                        Drone: ${m.drone_id} | Status: ${m.dispatch_status} | ETA: ${Math.round(m.eta_minutes)} min
+                    </div>
+                </div>
+            `).join("")}
+        `;
+
+        // Auto-select first mission if none selected
+        if (!selectedMissionId && missions.length > 0) {
+            selectedMissionId = missions[0].order_id;
+        }
+
+        // Update selection visual
+        if (selectedMissionId) {
+            updateMissionSelection();
+        }
+    } catch (e) {
+        document.getElementById("active-missions-list").innerHTML = `
+            <div class="empty-state" style="padding:16px;">Failed to load missions: ${e.message}</div>
+        `;
+    }
+}
+
+function selectMission(orderId) {
+    selectedMissionId = orderId;
+    updateMissionSelection();
+    addSimLog(`Selected mission: ${orderId}`);
+}
+
+function updateMissionSelection() {
+    document.querySelectorAll('[id^="mission-"]').forEach(el => {
+        el.style.borderColor = "#334155";
+        el.style.background = "#0f172a";
+    });
+    const selected = document.getElementById(`mission-${selectedMissionId}`);
+    if (selected) {
+        selected.style.borderColor = "#3b82f6";
+        selected.style.background = "rgba(59,130,246,0.1)";
+    }
+}
+
+async function triggerWeatherPoll() {
+    if (!selectedMissionId) {
+        addSimLog("No mission selected. Please select a mission first.");
+        alert("Please select an active mission first.");
+        return;
+    }
+
+    addSimLog(`Triggering weather poll for mission ${selectedMissionId}...`);
+
+    try {
+        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/simulate/weather`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: selectedMissionId })
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog(`Weather poll triggered for ${selectedMissionId} - checking for unsafe conditions...`);
+            setTimeout(() => {
+                refreshActiveMissions();
+                addSimLog("Refreshed mission list - check if mission was aborted/rerouted");
+            }, 3000);
+        } else {
+            addSimLog(`Failed to trigger weather poll: ${data.error || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`Error triggering weather poll: ${e.message}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grid-Based Hazard Zone Management
+// ---------------------------------------------------------------------------
+
+window.hazardZones = [];
+
+function addHazardZone() {
+    const lat = parseFloat(document.getElementById("sim-hazard-lat").value);
+    const lng = parseFloat(document.getElementById("sim-hazard-lng").value);
+    const radius = parseFloat(document.getElementById("sim-hazard-radius").value);
+
+    if (isNaN(lat) || isNaN(lng) || isNaN(radius)) {
+        alert("Please enter valid latitude, longitude, and radius values.");
+        return;
+    }
+
+    if (lat < -90 || lat > 90) {
+        alert("Latitude must be between -90 and 90.");
+        return;
+    }
+
+    if (lng < -180 || lng > 180) {
+        alert("Longitude must be between -180 and 180.");
+        return;
+    }
+
+    const zone = {
+        lat: lat,
+        lng: lng,
+        radius_km: radius,
+        id: Date.now()
+    };
+
+    window.hazardZones.push(zone);
+    updateHazardZonesList();
+    addSimLog(`Added hazard zone: (${lat.toFixed(4)}, ${lng.toFixed(4)}) - ${radius}km radius`);
+}
+
+function removeHazardZone(id) {
+    window.hazardZones = window.hazardZones.filter(z => z.id !== id);
+    updateHazardZonesList();
+    addSimLog(`Removed hazard zone`);
+}
+
+function clearHazardZones() {
+    window.hazardZones = [];
+    updateHazardZonesList();
+    addSimLog(`Cleared all hazard zones`);
+}
+
+function updateHazardZonesList() {
+    const listEl = document.getElementById("hazard-zones-list");
+
+    if (window.hazardZones.length === 0) {
+        listEl.innerHTML = '<div class="empty-state" style="padding:12px; font-size:12px; color:#64748b;">No hazard zones defined. Add zones above to test grid-based rerouting.</div>';
+        return;
+    }
+
+    listEl.innerHTML = window.hazardZones.map(zone => `
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 12px; background:#0f172a; border:1px solid #334155; border-radius:4px; margin-bottom:6px;">
+            <div style="font-size:11px; color:#e2e8f0;">
+                <span style="color:#f87171;">&#128165;</span>
+                (${zone.lat.toFixed(4)}, ${zone.lng.toFixed(4)}) - ${zone.radius_km}km
+            </div>
+            <button onclick="removeHazardZone(${zone.id})" style="padding:4px 8px; background:#dc2626; color:white; border:none; border-radius:3px; font-size:10px; cursor:pointer;">&times;</button>
+        </div>
+    `).join("");
+}
+
+// Singapore region preset hazard zones
+const HAZARD_PRESETS = {
+    central: { lat: 1.3521, lng: 103.8198, name: "Central Singapore" },
+    marina_bay: { lat: 1.2834, lng: 103.8607, name: "Marina Bay" },
+    changi: { lat: 1.3644, lng: 103.9915, name: "Changi Airport" },
+    jurong: { lat: 1.3174, lng: 103.7441, name: "Jurong" },
+    woodlands: { lat: 1.4361, lng: 103.7865, name: "Woodlands" }
+};
+
+function addPresetHazard(location) {
+    const preset = HAZARD_PRESETS[location];
+    if (!preset) {
+        alert(`Unknown preset: ${location}`);
+        return;
+    }
+
+    const zone = {
+        lat: preset.lat,
+        lng: preset.lng,
+        radius_km: 1.5,
+        id: Date.now()
+    };
+
+    window.hazardZones.push(zone);
+    updateHazardZonesList();
+    addSimLog(`Added preset hazard zone: ${preset.name}`);
+}

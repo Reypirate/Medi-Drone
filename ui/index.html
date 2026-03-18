@@ -35,12 +35,17 @@
         .logo-icon {
             width: 36px;
             height: 36px;
-            background: #3b82f6;
             border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 18px;
+            overflow: hidden;
+        }
+
+        .logo-icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
         }
 
         .status-bar {
@@ -666,13 +671,14 @@
 <body>
     <header>
         <div class="logo">
-            <div class="logo-icon">+</div>
+            <div class="logo-icon"><img src="medi-drone-logo.png" alt="Medi-Drone Logo"></div>
             Medi-Drone
         </div>
         <div class="nav-links">
             <button class="nav-link active" id="nav-dashboard" onclick="navigateTo('dashboard')">Dashboard</button>
             <button class="nav-link" id="nav-inventory" onclick="navigateTo('inventory')">Inventory</button>
             <button class="nav-link" id="nav-drones" onclick="navigateTo('drones')">Drones</button>
+            <button class="nav-link" id="nav-simulation" onclick="navigateTo('simulation')">Simulation</button>
         </div>
         <div class="status-bar">
             <span><span class="status-dot green" id="api-status"></span>API Gateway</span>
@@ -807,6 +813,157 @@
                 <div id="drone-stats" class="drone-stats"></div>
                 <div id="drone-list">
                     <div class="empty-state">Loading drone fleet data...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="page-simulation" class="page-hidden">
+        <div class="inventory-page">
+            <div class="panel">
+                <div class="panel-title">
+                    <span style="font-size:18px;">&#9889;</span>
+                    Weather Simulation Control Panel
+                    <button onclick="refreshSimulationStatus()" style="margin-left:auto; padding:6px 14px; background:#334155; border:none; border-radius:6px; color:#e2e8f0; cursor:pointer; font-size:12px;">Refresh Status</button>
+                </div>
+
+                <!-- Simulation Status -->
+                <div style="margin-bottom:24px; padding:16px; background:#0f172a; border-radius:8px; border:1px solid #334155;">
+                    <div style="font-size:14px; font-weight:600; color:#f8fafc; margin-bottom:8px;">Simulation Status</div>
+                    <div id="sim-status-content" style="font-size:13px; color:#94a3b8;">Loading...</div>
+                </div>
+
+                <!-- Weather Simulation Controls -->
+                <div style="margin-bottom:24px;">
+                    <div style="font-size:14px; font-weight:600; color:#f8fafc; margin-bottom:12px;">Weather Conditions</div>
+
+                    <div style="display:flex; flex-direction:column; gap:12px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="sim-unsafe" checked style="width:auto;">
+                            <span style="color:#e2e8f0;">Force Unsafe Weather (triggers cancellation/abort)</span>
+                        </label>
+
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-left:24px;">
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="checkbox" id="sim-high-wind" checked style="width:auto;">
+                                <span style="color:#94a3b8; font-size:13px;">High Wind (>40 km/h)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="checkbox" id="sim-heavy-rain" checked style="width:auto;">
+                                <span style="color:#94a3b8; font-size:13px;">Heavy Rain (>10mm/h)</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="checkbox" id="sim-thunderstorm" checked style="width:auto;">
+                                <span style="color:#94a3b8; font-size:13px;">Thunderstorm</span>
+                            </label>
+                            <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                <input type="checkbox" id="sim-tornado" style="width:auto;">
+                                <span style="color:#94a3b8; font-size:13px;">Tornado</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div style="margin-top:16px; display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div>
+                            <label style="font-size:13px;">Wind Speed (km/h)</label>
+                            <input type="number" id="sim-wind-speed" value="65" min="0" max="200">
+                        </div>
+                        <div>
+                            <label style="font-size:13px;">Rainfall (mm/h)</label>
+                            <input type="number" id="sim-rain-mm" value="15" min="0" max="100">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Grid-Based Hazard Zones -->
+                <div style="margin-bottom:24px; padding:16px; background:#1e293b; border-radius:8px; border:1px solid #334155;">
+                    <div style="font-size:14px; font-weight:600; color:#f8fafc; margin-bottom:12px;">
+                        <span style="margin-right:8px;">&#127795;</span>
+                        Grid-Based Hazard Zones
+                        <label style="margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+                            <input type="checkbox" id="sim-use-grid-hazards" style="width:auto;">
+                            <span style="color:#94a3b8;">Enable Grid Hazards</span>
+                        </label>
+                    </div>
+                    <div style="font-size:12px; color:#94a3b8; margin-bottom:12px;">
+                        Create specific hazard zones to test mid-flight rerouting. Hazards will only affect drones flying through these zones.
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-bottom:12px;">
+                        <div>
+                            <label style="font-size:12px;">Latitude</label>
+                            <input type="number" id="sim-hazard-lat" value="1.35" step="0.0001" placeholder="e.g. 1.35">
+                        </div>
+                        <div>
+                            <label style="font-size:12px;">Longitude</label>
+                            <input type="number" id="sim-hazard-lng" value="103.82" step="0.0001" placeholder="e.g. 103.82">
+                        </div>
+                        <div>
+                            <label style="font-size:12px;">Radius (km)</label>
+                            <input type="number" id="sim-hazard-radius" value="1.5" min="0.5" max="10" step="0.5">
+                        </div>
+                    </div>
+
+                    <div style="display:flex; gap:8px;">
+                        <button onclick="addHazardZone()" style="flex:1; padding:8px 12px; background:#3b82f6; color:white; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer;">
+                            + Add Hazard Zone
+                        </button>
+                        <button onclick="clearHazardZones()" style="padding:8px 16px; background:#64748b; color:white; border:none; border-radius:6px; font-size:12px; cursor:pointer;">
+                            Clear All
+                        </button>
+                    </div>
+
+                    <div id="hazard-zones-list" style="margin-top:12px; max-height:150px; overflow-y:auto;">
+                        <div class="empty-state" style="padding:12px; font-size:12px; color:#64748b;">No hazard zones defined. Add zones above to test grid-based rerouting.</div>
+                    </div>
+
+                    <!-- Quick Presets -->
+                    <div style="margin-top:12px; padding-top:12px; border-top:1px solid #334155;">
+                        <div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Quick Presets (Singapore):</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                            <button onclick="addPresetHazard('central')" style="padding:6px 10px; background:#334155; color:#e2e8f0; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Central</button>
+                            <button onclick="addPresetHazard('marina_bay')" style="padding:6px 10px; background:#334155; color:#e2e8f0; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Marina Bay</button>
+                            <button onclick="addPresetHazard('changi')" style="padding:6px 10px; background:#334155; color:#e2e8f0; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Changi</button>
+                            <button onclick="addPresetHazard('jurong')" style="padding:6px 10px; background:#334155; color:#e2e8f0; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Jurong</button>
+                            <button onclick="addPresetHazard('woodlands')" style="padding:6px 10px; background:#334155; color:#e2e8f0; border:none; border-radius:4px; font-size:11px; cursor:pointer;">Woodlands</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div style="display:flex; gap:12px; margin-bottom:24px;">
+                    <button onclick="enableSimulation()" style="flex:1; padding:12px; background:#ef4444; color:white; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer;">
+                        Enable Bad Weather
+                    </button>
+                    <button onclick="disableSimulation()" style="flex:1; padding:12px; background:#22c55e; color:white; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer;">
+                        Disable Simulation
+                    </button>
+                </div>
+
+                <!-- Mission Testing -->
+                <div style="border-top:1px solid #334155; padding-top:20px;">
+                    <div style="font-size:14px; font-weight:600; color:#f8fafc; margin-bottom:12px;">Mission Testing</div>
+
+                    <div id="active-missions-list" style="margin-bottom:16px;">
+                        <div class="empty-state" style="padding:16px;">No active missions. Create an order first to test weather cancellation.</div>
+                    </div>
+
+                    <div style="display:flex; gap:12px;">
+                        <button onclick="triggerWeatherPoll()" style="flex:1; padding:12px; background:#f59e0b; color:white; border:none; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer;">
+                            Trigger Weather Poll for Selected Mission
+                        </button>
+                        <button onclick="refreshActiveMissions()" style="padding:12px 20px; background:#334155; color:#e2e8f0; border:none; border-radius:8px; font-size:13px; font-weight:500; cursor:pointer;">
+                            Refresh Missions
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Simulation Log -->
+                <div style="margin-top:24px;">
+                    <div style="font-size:14px; font-weight:600; color:#f8fafc; margin-bottom:12px;">Simulation Log</div>
+                    <div class="notification-area" id="sim-log" style="max-height:250px;">
+                        <div class="empty-state" style="padding:16px;">Simulation log will appear here...</div>
+                    </div>
                 </div>
             </div>
         </div>
