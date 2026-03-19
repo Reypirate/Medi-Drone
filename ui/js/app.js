@@ -909,8 +909,9 @@ async function refreshSimulationStatus() {
     }
 }
 
-async function enableSimulation() {
-    const unsafe = document.getElementById("sim-unsafe").checked;
+// ── MODE 1: Cancellation Simulation ───────────────────────────────────────
+
+async function enableCancellationMode() {
     const highWind = document.getElementById("sim-high-wind").checked;
     const heavyRain = document.getElementById("sim-heavy-rain").checked;
     const thunderstorm = document.getElementById("sim-thunderstorm").checked;
@@ -925,11 +926,11 @@ async function enableSimulation() {
     if (tornado) reasons.push("TORNADO");
 
     const payload = {
-        force_unsafe: unsafe,
+        force_unsafe: true,
         unsafe_reason: reasons.length > 0 ? reasons : ["HIGH_WIND"],
         wind_speed_kmh: windSpeed,
         rain_mm: rainMm,
-        hazard_zones: window.hazardZones || []
+        hazard_zones: []  // Empty for cancellation mode
     };
 
     try {
@@ -941,13 +942,52 @@ async function enableSimulation() {
         const data = await resp.json();
 
         if (resp.ok) {
-            addSimLog(`Simulation ENABLED: ${data.config.unsafe_reason.join(", ")} (${data.config.wind_speed_kmh} km/h wind)`);
+            addSimLog(`&#9888; CANCELLATION MODE ACTIVATED: ${data.config.unsafe_reason.join(", ")} (${data.config.wind_speed_kmh} km/h wind)`);
+            addSimLog(`  Drones will ABORT when weather poll detects unsafe conditions`);
             refreshSimulationStatus();
         } else {
-            addSimLog(`Failed to enable simulation: ${data.message || "Unknown error"}`);
+            addSimLog(`Failed to enable cancellation mode: ${data.message || "Unknown error"}`);
         }
     } catch (e) {
-        addSimLog(`Error enabling simulation: ${e.message}`);
+        addSimLog(`Error enabling cancellation mode: ${e.message}`);
+    }
+}
+
+// ── MODE 2: Rerouting Simulation ──────────────────────────────────────────
+
+async function enableReroutingMode() {
+    const hazardZones = window.hazardZones || [];
+
+    if (hazardZones.length === 0) {
+        addSimLog(`&#9888; No hazard zones defined. Add hazard zones first, then activate.`);
+        return;
+    }
+
+    const payload = {
+        force_unsafe: false,  // Don't force unsafe, just use hazard zones
+        unsafe_reason: [],    // Empty for rerouting mode
+        wind_speed_kmh: 20,   // Safe wind speed for rerouting mode
+        rain_mm: 0,           // No rain for rerouting mode
+        hazard_zones: hazardZones
+    };
+
+    try {
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/enable`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog(`&#127795; REROUTING MODE ACTIVATED: ${hazardZones.length} hazard zone(s) loaded`);
+            addSimLog(`  Drones will REROUTE around hazard zones using A* pathfinding`);
+            refreshSimulationStatus();
+        } else {
+            addSimLog(`Failed to enable rerouting mode: ${data.message || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`Error enabling rerouting mode: ${e.message}`);
     }
 }
 
@@ -960,7 +1000,7 @@ async function disableSimulation() {
         const data = await resp.json();
 
         if (resp.ok) {
-            addSimLog("Simulation DISABLED - weather service using normal mode");
+            addSimLog(`&#10003; ALL SIMULATION MODES DISABLED - weather service using normal mode`);
             refreshSimulationStatus();
         } else {
             addSimLog(`Failed to disable simulation: ${data.message || "Unknown error"}`);
