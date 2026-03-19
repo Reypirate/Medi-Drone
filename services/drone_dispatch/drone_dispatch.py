@@ -22,8 +22,8 @@ ROUTE_URL = os.environ.get("ROUTE_URL", "http://route-planning:5009")
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 
-# Battery consumption: ~1% per km traveled
-BATTERY_CONSUMPTION_PER_KM = 1.0
+# Battery consumption: ~1.8% per km at base drone weight (matches route_planning BASE_CONSUMPTION_PER_KM)
+BATTERY_CONSUMPTION_PER_KM = 1.8
 LOW_BATTERY_THRESHOLD = 40  # Percentage below which drones auto-charge
 
 ITEM_WEIGHTS = {
@@ -44,6 +44,7 @@ EARTH_RADIUS_KM = 6371.0
 # Global lock for drone reservation to prevent race conditions
 drone_reservation_lock = threading.Lock()
 reserved_drones = set()  # Track drones that have been reserved but not yet in flight
+order_drone_reservations = {}  # Map order_id -> drone_id for cleanup before active_missions is populated
 
 
 def haversine(lat1, lng1, lat2, lng2):
@@ -212,8 +213,9 @@ def dispatch_order(order_data):
             cancel_order(order_id, "NO_DRONES_AVAILABLE", "All drones have been assigned to other orders.")
             return
 
-        # Reserve the drone
+        # Reserve the drone and track order->drone mapping for cleanup
         reserved_drones.add(selected_drone)
+        order_drone_reservations[order_id] = selected_drone
         print(f"  [DISPATCH] Reserved drone {selected_drone} for order {order_id}")
 
     # Step 6: Update drone status to IN_FLIGHT with position tracking
@@ -261,9 +263,10 @@ def dispatch_order(order_data):
         "initial_eta": eta_minutes,  # Store for progress calculation
         "payload_weight": payload_weight,
     }
-    # Drone is now in active_missions, so we can remove it from reserved_drones
+    # Drone is now in active_missions, so remove from reservation tracking
     with drone_reservation_lock:
         reserved_drones.discard(selected_drone)
+        order_drone_reservations.pop(order_id, None)
     print(f"  [MISSIONS] Mission fully initialized: {order_id} | Active missions: {len(active_missions)}")
 
 
@@ -288,15 +291,13 @@ def cancel_order(order_id, reason, detail_message=None):
         drone_id = active_missions[order_id].get("drone_id")
         print(f"  [DISPATCH] Releasing drone {drone_id} for cancelled order {order_id}")
         del active_missions[order_id]
-    else:
-        # Order might have been reserved but not yet added to active_missions
-        # We need to find it in reserved_drones by checking recent reservations
-        # This is tricky - we'll need to track which order reserved which drone
-        # For now, just clean up any orphaned reservations
-        pass
 
-    # Also clean up from reserved_drones if present
+    # Also check order_drone_reservations for drones reserved but not yet in active_missions
     with drone_reservation_lock:
+        if not drone_id:
+            drone_id = order_drone_reservations.pop(order_id, None)
+        else:
+            order_drone_reservations.pop(order_id, None)
         if drone_id and drone_id in reserved_drones:
             reserved_drones.remove(drone_id)
             print(f"  [DISPATCH] Removed {drone_id} from reserved_drones")
@@ -345,6 +346,11 @@ def check_and_send_low_battery_drones_to_charging():
     for drone in low_battery_drones:
         drone_id = drone.get("drone_id")
         current_battery = drone.get("battery", 0)
+
+        # Skip if a charging mission already exists for this drone
+        if f"{drone_id}_charging" in active_missions:
+            print(f"  [BATTERY] Drone {drone_id} already has a charging mission, skipping")
+            continue
 
         try:
             # Update drone to CHARGING status at depot
@@ -582,6 +588,7 @@ def poll_active_missions():
                 mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
                 mission["route_id"] = reroute_data.get("route_id")
                 mission["updated_eta"] = reroute_data.get("updated_eta")
+                # Store comprehensive reroute details in mission object
                 mission["reroute_details"] = {
                     "original_distance_km": original_distance_km,
                     "new_distance_km": new_distance_km,
@@ -591,6 +598,10 @@ def poll_active_missions():
                     "route_summary": route_summary,
                     "new_eta_minutes": new_eta_minutes,
                 }
+                # Reset the countdown ETA to the rerouted distance's ETA
+                if reroute_data.get("eta_minutes"):
+                    mission["eta_minutes"] = reroute_data["eta_minutes"]
+                    mission["initial_eta"] = reroute_data["eta_minutes"]
 
                 try:
                     http_requests.post(
@@ -619,7 +630,7 @@ def handle_mission_abort(order_id, mission):
     try:
         http_requests.patch(
             f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
-            json={"status": "RETURNING", "lat": mission["current_coords"]["lat"],
+            json={"status": "RETURNING_TO_DEPOT", "lat": mission["current_coords"]["lat"],
                   "lng": mission["current_coords"]["lng"]},
             timeout=10,
         )
@@ -721,7 +732,7 @@ def handle_delivery_completion(order_id, mission):
         "current_coords": mission["customer_coords"].copy(),
         "destination_coords": depot_coords,
         "dispatch_status": "RETURNING_TO_DEPOT",
-        "eta_minutes": int(distance_to_depot / 0.5),  # Assume 30km/h
+        "eta_minutes": round((distance_to_depot / DRONE_SPEED_KMH) * 60),
     }
     print(f"  [MISSIONS] Return mission added: {order_id}_return | Active missions: {len(active_missions)}")
 
@@ -868,6 +879,7 @@ def _run_single_poll(order_id, mission):
         mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
         mission["route_id"] = reroute_data.get("route_id")
         mission["updated_eta"] = reroute_data.get("updated_eta")
+        # Store comprehensive reroute details in mission object
         mission["reroute_details"] = {
             "original_distance_km": original_distance_km,
             "new_distance_km": new_distance_km,
@@ -877,7 +889,10 @@ def _run_single_poll(order_id, mission):
             "route_summary": route_summary,
             "new_eta_minutes": new_eta_minutes,
         }
-
+        # Reset the countdown ETA to the rerouted distance's ETA
+        if reroute_data.get("eta_minutes"):
+            mission["eta_minutes"] = reroute_data["eta_minutes"]
+            mission["initial_eta"] = reroute_data["eta_minutes"]
         try:
             http_requests.post(
                 f"{ORDER_URL}/dispatch/update",
