@@ -478,7 +478,9 @@ def poll_active_missions():
                 continue
 
             # Decrease ETA by poll interval (30 seconds = 0.5 minutes)
+            old_eta = current_eta
             mission["eta_minutes"] = max(0, current_eta - (POLL_INTERVAL_SECONDS / 60))
+            print(f"  [POLL] {order_id}: ETA {old_eta:.1f} → {mission['eta_minutes']:.1f} min (decremented by {POLL_INTERVAL_SECONDS/60:.1f} min)")
 
             # Update order service with current ETA
             try:
@@ -598,10 +600,25 @@ def poll_active_missions():
                     "route_summary": route_summary,
                     "new_eta_minutes": new_eta_minutes,
                 }
-                # Reset the countdown ETA to the rerouted distance's ETA
+                # Reset the countdown ETA to account for time already traveled + new route time
+                # The route planning service returns ETA for remaining segment only, so we need to
+                # add back the time already spent to get the correct total mission time
+                old_initial_eta = mission.get("initial_eta", new_eta_minutes)
+                old_eta_minutes = mission.get("eta_minutes", 0)
+                time_already_spent = old_initial_eta - old_eta_minutes
+                new_total_mission_time = time_already_spent + new_eta_minutes
+
+                print(f"  [REROUTE] ETA Calculation:")
+                print(f"  [REROUTE]   Old initial ETA: {old_initial_eta:.1f} min")
+                print(f"  [REROUTE]   Old remaining ETA: {old_eta_minutes:.1f} min")
+                print(f"  [REROUTE]   Time already spent: {time_already_spent:.1f} min")
+                print(f"  [REROUTE]   New route ETA (remaining): {new_eta_minutes:.1f} min")
+                print(f"  [REROUTE]   New total mission time: {new_total_mission_time:.1f} min")
+                print(f"  [REROUTE]   ETA change: {old_eta_minutes:.1f} → {new_total_mission_time:.1f} min ({new_total_mission_time - old_eta_minutes:+.1f} min)")
+
                 if reroute_data.get("eta_minutes"):
-                    mission["eta_minutes"] = reroute_data["eta_minutes"]
-                    mission["initial_eta"] = reroute_data["eta_minutes"]
+                    mission["eta_minutes"] = new_eta_minutes
+                    mission["initial_eta"] = new_total_mission_time
 
                 try:
                     http_requests.post(
