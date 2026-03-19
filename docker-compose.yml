@@ -178,6 +178,12 @@ services:
     container_name: order
     ports:
       - "5001:5001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
     environment:
       INVENTORY_URL: http://inventory:5003
       HOSPITAL_URL: http://hospital:5005
@@ -198,6 +204,12 @@ services:
     container_name: drone-dispatch
     ports:
       - "5002:5002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
     environment:
       ORDER_URL: http://order:5001
       HOSPITAL_URL: http://hospital:5005
@@ -250,9 +262,9 @@ services:
       - "8001:8001"
     depends_on:
       order:
-        condition: service_started
+        condition: service_healthy
       drone-dispatch:
-        condition: service_started
+        condition: service_healthy
     networks:
       - medidrone-net
 

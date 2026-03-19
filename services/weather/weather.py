@@ -414,82 +414,89 @@ def live_corridor_check():
 
     # Check simulation mode first
     if simulation_mode["enabled"]:
-        if simulation_mode["force_unsafe"]:
-            # Use grid-based hazard zones if provided, otherwise use legacy single hazard center
-            hazard_zones = simulation_mode.get("hazard_zones", [])
+        hazard_zones = simulation_mode.get("hazard_zones", [])
 
-            if hazard_zones:
-                # Grid-based simulation: check if the flight path intersects any hazard zone
-                sample_points = interpolate_points(current, destination, num_samples=10)
-                detected_hazards = []
+        if hazard_zones:
+            # Grid-based simulation: check if the flight path intersects any hazard zone
+            sample_points = interpolate_points(current, destination, num_samples=10)
+            detected_hazards = []
 
-                for point in sample_points:
-                    in_hazard, zone = is_point_in_hazard_zone(
-                        point["lat"], point["lng"], hazard_zones
-                    )
-                    if in_hazard and zone not in detected_hazards:
-                        detected_hazards.append(zone)
+            for point in sample_points:
+                in_hazard, zone = is_point_in_hazard_zone(
+                    point["lat"], point["lng"], hazard_zones
+                )
+                if in_hazard and zone not in detected_hazards:
+                    detected_hazards.append(zone)
 
-                if detected_hazards:
-                    # Merge multiple hazard zones into single bounding zone
-                    merged_hazard = merge_hazard_zones(detected_hazards)
-                    print(f"  [SIMULATION] Merged {len(detected_hazards)} hazard zones into single bounding zone")
-                    print(f"  [SIMULATION] Merged hazard: center=({merged_hazard['lat']},{merged_hazard['lng']}), radius={merged_hazard['radius_km']}km")
-                    return jsonify({
-                        "status": "UNSAFE",
-                        "reason": simulation_mode["unsafe_reason"],
-                        "wind_kmh": simulation_mode["wind_speed_kmh"],
-                        "hazard_zone": {
-                            "center": {"lat": merged_hazard["lat"], "lng": merged_hazard["lng"]},
-                            "radius_km": merged_hazard["radius_km"],
-                        },
-                        "recommended_action": "REROUTE",
-                        "order_id": order_id,
-                        "drone_id": drone_id,
-                        "source": "SIMULATION_GRID_MERGED",
-                        "hazards_detected": len(detected_hazards),
-                        "hazards_merged": True,
-                    })
-                else:
-                    # No hazard detected on flight path - safe to proceed
-                    print(f"  [SIMULATION] No grid hazards on flight path for order {order_id}")
-                    return jsonify({
-                        "status": "SAFE",
-                        "wind_kmh": 10.0,
-                        "order_id": order_id,
-                        "drone_id": drone_id,
-                        "source": "SIMULATION_GRID",
-                    })
-            else:
-                # Legacy single hazard zone (whole Singapore mode)
-                hazard_center = simulation_mode["hazard_center"]
-                if not hazard_center:
-                    hazard_center = {
-                        "lat": (current.get("lat", 0) + destination.get("lat", 0)) / 2,
-                        "lng": (current.get("lng", 0) + destination.get("lng", 0)) / 2
-                    }
-                print(f"  [SIMULATION] Returning UNSAFE corridor weather for order {order_id} (legacy mode)")
+            if detected_hazards:
+                # Merge multiple hazard zones into single bounding zone
+                merged_hazard = merge_hazard_zones(detected_hazards)
+                print(f"  [SIMULATION] Merged {len(detected_hazards)} hazard zones into single bounding zone")
+                print(f"  [SIMULATION] Merged hazard: center=({merged_hazard['lat']},{merged_hazard['lng']}), radius={merged_hazard['radius_km']}km")
                 return jsonify({
                     "status": "UNSAFE",
                     "reason": simulation_mode["unsafe_reason"],
                     "wind_kmh": simulation_mode["wind_speed_kmh"],
                     "hazard_zone": {
-                        "center": hazard_center,
-                        "radius_km": 2.0,
+                        "center": {"lat": merged_hazard["lat"], "lng": merged_hazard["lng"]},
+                        "radius_km": merged_hazard["radius_km"],
                     },
                     "recommended_action": "REROUTE",
                     "order_id": order_id,
                     "drone_id": drone_id,
-                    "source": "SIMULATION",
+                    "source": "SIMULATION_GRID_MERGED",
+                    "hazards_detected": len(detected_hazards),
+                    "hazards_merged": True,
                 })
+            else:
+                # No hazard detected on flight path - safe to proceed
+                print(f"  [SIMULATION] No grid hazards on flight path for order {order_id}")
+                return jsonify({
+                    "status": "SAFE",
+                    "wind_kmh": 10.0,
+                    "order_id": order_id,
+                    "drone_id": drone_id,
+                    "source": "SIMULATION_GRID",
+                })
+        elif simulation_mode["force_unsafe"]:
+            # Force unsafe mode without hazard zones (legacy whole Singapore mode)
+            hazard_center = simulation_mode["hazard_center"]
+            if not hazard_center:
+                hazard_center = {
+                    "lat": (current.get("lat", 0) + destination.get("lat", 0)) / 2,
+                    "lng": (current.get("lng", 0) + destination.get("lng", 0)) / 2
+                }
+            # Calculate flight path distance and use proportional radius (12% of distance)
+            # This ensures the hazard blocks the path but can be routed around
+            flight_distance = haversine_distance(
+                current.get("lat", 0), current.get("lng", 0),
+                destination.get("lat", 0), destination.get("lng", 0)
+            )
+            # Use 12% of flight distance, with min 0.3km and max 1.5km
+            proportional_radius = max(0.3, min(1.5, flight_distance * 0.12))
+            print(f"  [SIMULATION] Returning UNSAFE corridor weather for order {order_id} (force unsafe mode, radius: {proportional_radius:.2f}km)")
+            return jsonify({
+                "status": "UNSAFE",
+                "reason": simulation_mode["unsafe_reason"],
+                "wind_kmh": simulation_mode["wind_speed_kmh"],
+                "hazard_zone": {
+                    "center": hazard_center,
+                    "radius_km": proportional_radius,
+                },
+                "recommended_action": "REROUTE",
+                "order_id": order_id,
+                "drone_id": drone_id,
+                "source": "SIMULATION_FORCE_UNSAFE",
+            })
         else:
-            print(f"  [SIMULATION] Returning SAFE corridor weather for order {order_id}")
+            # Simulation enabled but no hazards and not forcing unsafe
+            print(f"  [SIMULATION] Returning SAFE corridor weather for order {order_id} (no hazards)")
             return jsonify({
                 "status": "SAFE",
                 "wind_kmh": 10.0,
                 "order_id": order_id,
                 "drone_id": drone_id,
-                "source": "SIMULATION",
+                "source": "SIMULATION_NO_HAZARDS",
             })
 
     if not OPENWEATHER_API_KEY:

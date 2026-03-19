@@ -1,4 +1,7 @@
 const API_BASE = window.location.protocol + "//" + window.location.hostname + ":8000";
+const WEATHER_URL = API_BASE;  // All routes go through Kong gateway
+const DISPATCH_URL = window.location.protocol + "//" + window.location.hostname + ":5002";  // Direct service URL
+const WEATHER_DIRECT_URL = window.location.protocol + "//" + window.location.hostname + ":5006";  // Direct service URL
 
 let selectedUrgency = "CRITICAL";
 let pollInterval = null;
@@ -735,7 +738,7 @@ async function loadDrones() {
     try {
         const [dronesResp, missionsResp] = await Promise.all([
             fetch(`${API_BASE}/api/drones/drones`),
-            fetch(`${API_BASE}/api/dispatch/dispatch/missions`).catch(() => null)
+            fetch(`${DISPATCH_URL}/dispatch/missions`).catch(() => null)
         ]);
 
         const drones = await dronesResp.json();
@@ -864,9 +867,6 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // ── Weather Simulation ──────────────────────────────────────────────
-
-const WEATHER_URL = API_BASE;  // Use Kong gateway to avoid CORS issues
-const DISPATCH_URL = API_BASE;  // Use Kong gateway to avoid CORS issues
 
 function addSimLog(message) {
     const area = document.getElementById("sim-log");
@@ -1009,7 +1009,7 @@ function displayRerouteDetails(orderData) {
 
 async function refreshActiveMissions() {
     try {
-        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/missions`);
+        const resp = await fetch(`${DISPATCH_URL}/dispatch/missions`);
         const data = await resp.json();
         const missions = data.active_missions || [];
 
@@ -1106,7 +1106,7 @@ async function triggerWeatherPollForMission(orderId) {
     addSimLog(`Triggering weather poll for mission ${orderId}...`);
 
     try {
-        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/simulate/weather`, {
+        const resp = await fetch(`${DISPATCH_URL}/dispatch/simulate/weather`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ order_id: orderId })
@@ -1151,7 +1151,7 @@ async function triggerWeatherPoll() {
     addSimLog(`Triggering weather poll for mission ${selectedMissionId}...`);
 
     try {
-        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/simulate/weather`, {
+        const resp = await fetch(`${DISPATCH_URL}/dispatch/simulate/weather`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ order_id: selectedMissionId })
@@ -1277,54 +1277,92 @@ async function autoPlaceHazard() {
 
     // Disable button and show loading state
     btn.disabled = true;
-    btn.textContent = "Placing Hazard...";
+    const originalText = btn.textContent;
+    btn.textContent = "Calculating...";
     btn.style.background = "#64748b";
 
     try {
-        addSimLog("Requesting auto-hazard placement for active mission...");
+        addSimLog("&#128202; Fetching active mission flight path...");
 
-        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/auto-hazard`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" }
-        });
+        // Fetch active missions first to get the path
+        const missionsResp = await fetch(`${DISPATCH_URL}/dispatch/missions`);
+        const missionsData = await missionsResp.json();
 
-        const data = await resp.json();
-
-        if (resp.ok) {
-            const status = data.status;
-
-            if (status === "HAZARD_PLACED") {
-                const hazard = data.hazard;
-                addSimLog(`&#9989; Auto-placed hazard zone at (${hazard.lat.toFixed(4)}, ${hazard.lng.toFixed(4)}) with ${hazard.radius_km}km radius`);
-
-                // Update hazard zones display if zones provided
-                if (data.hazard_zones && data.hazard_zones.length > 0) {
-                    renderHazardZones(data.hazard_zones);
-                }
-
-                // Refresh mission list to show updated status
-                await refreshActiveMissions();
-
-            } else if (status === "NO_ACTIVE_MISSION") {
-                addSimLog(`&#9888; No active mission found. Please create an order first.`);
-
-            } else if (status === "MISSION_NEAR_COMPLETION") {
-                addSimLog(`&#9888; Mission is too close to destination for hazard placement (${data.remaining_distance_km.toFixed(1)}km remaining)`);
-
-            } else {
-                addSimLog(`Unexpected response status: ${status}`);
-            }
-
-        } else {
-            addSimLog(`&#10060; Failed to place hazard: ${data.message || data.error || "Unknown error"}`);
+        if (!missionsData.active_missions || missionsData.active_missions.length === 0) {
+            addSimLog(`&#9888; No active missions found. Please create an order first.`);
+            return;
         }
 
+        // Use selected mission if available, otherwise find first IN_FLIGHT mission
+        let mission;
+        if (selectedMissionId) {
+            mission = missionsData.active_missions.find(m => m.order_id === selectedMissionId);
+            if (!mission) {
+                addSimLog(`&#9888; Selected mission ${selectedMissionId} not found. Using first IN_FLIGHT mission.`);
+                mission = missionsData.active_missions.find(m =>
+                    m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+                );
+            }
+        } else {
+            mission = missionsData.active_missions.find(m =>
+                m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+            );
+        }
+
+        if (!mission) {
+            addSimLog(`&#9888; No in-flight missions found.`);
+            return;
+        }
+
+        const current = mission.current_coords;
+        const customer = mission.customer_coords;
+
+        // Calculate midpoint
+        const midLat = (current.lat + customer.lat) / 2;
+        const midLng = (current.lng + customer.lng) / 2;
+
+        // Calculate recommended radius (about 12% of remaining distance)
+        // Using Haversine formula for distance
+        const R = 6371; // Earth's radius in km
+        const dLat = (customer.lat - current.lat) * Math.PI / 180;
+        const dLng = (customer.lng - current.lng) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(current.lat * Math.PI / 180) *
+                  Math.cos(customer.lat * Math.PI / 180) *
+                  Math.sin(dLng / 2) ** 2;
+        const c = 2 * Math.asin(Math.sqrt(a));
+        const remainingDistanceKm = R * c;
+
+        // Recommended radius: 12% of remaining distance, min 0.3km, max 1.5km
+        const recommendedRadius = Math.max(0.3, Math.min(1.5, remainingDistanceKm * 0.12));
+
+        // Populate input fields
+        const latInput = document.getElementById("sim-hazard-lat");
+        const lngInput = document.getElementById("sim-hazard-lng");
+        const radiusInput = document.getElementById("sim-hazard-radius");
+
+        if (latInput) latInput.value = midLat.toFixed(6);
+        if (lngInput) lngInput.value = midLng.toFixed(6);
+        if (radiusInput) radiusInput.value = recommendedRadius.toFixed(2);
+
+        // Show mission info in log
+        addSimLog(`&#9989; <strong>Flight Path Calculated</strong>`);
+        addSimLog(`&nbsp;&nbsp;&#128205; Order: ${mission.order_id} | Drone: ${mission.drone_id}`);
+        addSimLog(`&nbsp;&nbsp;&#129686; Status: ${mission.dispatch_status} | ETA: ${mission.eta_minutes}min`);
+        addSimLog(`&nbsp;&nbsp;&#128396; Remaining distance: ${remainingDistanceKm.toFixed(2)}km`);
+        addSimLog(`&nbsp;&nbsp;&#10142; <strong>Flight Path:</strong>`);
+        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;From: (${current.lat.toFixed(4)}, ${current.lng.toFixed(4)})`);
+        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;To: (${customer.lat.toFixed(4)}, ${customer.lng.toFixed(4)})`);
+        addSimLog(`&nbsp;&nbsp;&#128165; <strong>Hazard inputs populated:</strong>`);
+        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;Lat: ${midLat.toFixed(6)}, Lng: ${midLng.toFixed(6)}, Radius: ${recommendedRadius.toFixed(2)}km (recommended)`);
+        addSimLog(`&nbsp;&nbsp;&#9888; <strong>Review above, then click "Add Hazard Zone" to add it</strong>`);
+
     } catch (e) {
-        addSimLog(`&#10060; Error placing hazard: ${e.message}`);
+        addSimLog(`&#10060; Error: ${e.message}`);
     } finally {
         // Re-enable button
         btn.disabled = false;
-        btn.textContent = "Auto-Place Hazard on Active Mission";
+        btn.textContent = originalText;
         btn.style.background = "#3b82f6";
     }
 }
