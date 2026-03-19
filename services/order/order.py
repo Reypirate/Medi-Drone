@@ -275,6 +275,7 @@ def cancel_order(order_id):
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
 
+    inventory_released = False
     try:
         http_requests.post(
             f"{INVENTORY_URL}/inventory/release",
@@ -286,17 +287,19 @@ def cancel_order(order_id):
             },
             timeout=10,
         )
+        inventory_released = True
     except Exception as e:
-        print(f"  [WARNING] Inventory release failed: {e}")
+        print(f"  [WARNING] Inventory release failed for order {order_id}: {e}")
 
     order["status"] = f"CANCELLED_{reason}"
     order["cancel_message"] = cancel_message
 
+    stock_note = "Reserved stock has been released." if inventory_released else "Warning: stock release failed — please check inventory manually."
     publish_message("notifications", "notify.sms", {
         "event_type": "ORDER_CANCELLED",
         "order_id": order_id,
         "hospital_id": order["hospital_id"],
-        "message": f"Order {order_id}: {cancel_message} Reserved stock has been released.",
+        "message": f"Order {order_id}: {cancel_message} {stock_note}",
     })
 
     return jsonify({"order_id": order_id, "status": order["status"], "message": cancel_message})
@@ -366,6 +369,7 @@ def dispatch_failure():
     order["status"] = f"CANCELLED_{failure_code}"
     order["dispatch_status"] = data.get("dispatch_status", "ABORTED")
 
+    inventory_released = False
     try:
         http_requests.post(
             f"{INVENTORY_URL}/inventory/release",
@@ -377,15 +381,17 @@ def dispatch_failure():
             },
             timeout=10,
         )
+        inventory_released = True
     except Exception as e:
-        print(f"  [WARNING] Inventory release failed: {e}")
+        print(f"  [WARNING] Inventory release failed for order {order_id}: {e}")
 
+    stock_note = "Reserved stock has been released." if inventory_released else "Warning: stock release failed — please check inventory manually."
     publish_message("notifications", "notify.sms", {
         "event_type": f"ORDER_CANCELLED_{failure_code}",
         "order_id": order_id,
         "hospital_id": order["hospital_id"],
         "message": f"URGENT: Delivery cancelled mid-flight due to {failure_code.replace('_', ' ').lower()}. "
-                   f"Drone returning to base. Reserved stock has been released.",
+                   f"Drone returning to base. {stock_note}",
     })
 
     return jsonify({
