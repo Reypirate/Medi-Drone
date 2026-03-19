@@ -90,13 +90,26 @@ Kong (port 8000/8001) routes all external traffic using declarative config in `k
 **Scenario 3.1: Mid-Flight Rerouting**
 1. `drone_dispatch` polls weather service every 30s (configurable via `POLL_INTERVAL`)
 2. If unsafe weather detected, requests reroute from `route_planning`
-3. A* pathfinding returns waypoints avoiding hazard zone
-4. Mission continues on new route, order status updated
+3. Multiple grid hazards are merged into single bounding zone for A* pathfinding
+4. A* pathfinding returns waypoints avoiding hazard zone with comprehensive metadata:
+   - Original distance vs detour distance
+   - Detour percentage
+   - Waypoint count
+   - Additional battery consumption
+5. Mission continues on new route, order status updated with reroute details
+6. UI displays reroute summary (detour %, waypoints, battery impact)
 
 **Scenario 3.2: Mid-Flight Cancellation**
 1. If A* returns no viable route, mission aborts
 2. Drone status set to RETURNING, inventory released
 3. Urgent SMS notification sent to doctor
+
+**Scenario 3.3: Auto-Hazard Simulation**
+1. Via UI "Auto-Place Hazard" button or `POST /weather/simulate/auto-hazard`
+2. System fetches active mission from dispatch service
+3. Calculates flight path midpoint using Haversine formula
+4. Places hazard zone at midpoint to trigger rerouting
+5. Grid-based hazards (3x3) are merged into bounding zone for efficient pathfinding
 
 ## Environment Variables
 
@@ -195,6 +208,19 @@ All routes go through Kong at `/api/<service>/...`
 - `POST /inventory/reserve` - Reserve stock
 - `POST /inventory/release` - Release reserved stock
 
+**Weather Service** (`/api/weather/`):
+- `GET /weather/live/<lat>/<lng>` - Get live weather data for coordinates
+- `POST /weather/simulate/enable` - Enable weather simulation mode (returns simulated hazard zones)
+- `POST /weather/simulate/disable` - Disable weather simulation mode
+- `POST /weather/simulate/auto-hazard` - Auto-place hazard zone on active mission's flight path
+- `POST /weather/simulate/hazard` - Manually place a hazard zone at specific coordinates
+- `DELETE /weather/simulate/hazard` - Remove hazard zone
+
+**Route Planning Service** (`/api/route/`):
+- `POST /route/reroute` - Calculate A* pathfinding route avoiding hazard zones
+  - Request: `{ "start_lat", "start_lng", "end_lat", "end_lng", "hazard_zones": [...] }`
+  - Response: `{ "waypoints", "distance_km", "original_distance_km", "detour_distance_km", "detour_percentage", "waypoint_count", "additional_battery_consumption_pct" }`
+
 ## Service Patterns
 
 ### AMQP Consumer Pattern
@@ -237,3 +263,8 @@ Defined in `drone_dispatch.py`:
 - `GRID_RESOLUTION`: 0.002 (~220m per grid cell)
 - `BASE_CONSUMPTION_PER_KM`: 1.8% battery at base weight
 - `DRONE_BASE_WEIGHT_KG`: 2.5
+
+**Inter-Service URLs** (used for direct service-to-service communication):
+- `DISPATCH_URL`: URL of drone_dispatch service (used by weather service for auto-hazard)
+- `WEATHER_URL`: URL of weather service (used by drone_dispatch for polling)
+- `ROUTE_PLANNING_URL`: URL of route_planning service (used by drone_dispatch for rerouting)

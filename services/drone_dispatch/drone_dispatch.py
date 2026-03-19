@@ -567,10 +567,37 @@ def poll_active_missions():
                 handle_mission_abort(order_id, mission)
             else:
                 # Scenario 3.1: Successful reroute
-                print(f"  [POLL] Reroute found for {order_id}: {reroute_data.get('route_id')}")
+                print(f"  [REROUTE] Reroute found for {order_id}: {reroute_data.get('route_id')}")
+
+                # Extract reroute details for comprehensive logging
+                original_distance_km = reroute_data.get("original_distance_km", 0)
+                new_distance_km = reroute_data.get("distance_km", 0)
+                detour_percentage = reroute_data.get("detour_percentage", 0)
+                waypoint_count = reroute_data.get("waypoint_count", 0)
+                battery_impact_pct = reroute_data.get("additional_battery_consumption_pct", 0)
+                route_summary = reroute_data.get("route_summary", "N/A")
+                new_eta_minutes = reroute_data.get("eta_minutes", 0)
+
+                # Enhanced logging with [REROUTE] prefix
+                print(f"  [REROUTE] Distance: {original_distance_km:.2f}km → {new_distance_km:.2f}km (detour: +{detour_percentage:.1f}%)")
+                print(f"  [REROUTE] Waypoints: {waypoint_count} | Battery impact: +{battery_impact_pct:.1f}%")
+                print(f"  [REROUTE] Route summary: {route_summary}")
+                print(f"  [REROUTE] New ETA: {new_eta_minutes:.1f} minutes")
+
+                # Store comprehensive reroute details in mission object
                 mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
                 mission["route_id"] = reroute_data.get("route_id")
                 mission["updated_eta"] = reroute_data.get("updated_eta")
+                # Store comprehensive reroute details in mission object
+                mission["reroute_details"] = {
+                    "original_distance_km": original_distance_km,
+                    "new_distance_km": new_distance_km,
+                    "detour_percentage": detour_percentage,
+                    "waypoint_count": waypoint_count,
+                    "battery_impact_pct": battery_impact_pct,
+                    "route_summary": route_summary,
+                    "new_eta_minutes": new_eta_minutes,
+                }
                 # Reset the countdown ETA to the rerouted distance's ETA
                 if reroute_data.get("eta_minutes"):
                     mission["eta_minutes"] = reroute_data["eta_minutes"]
@@ -585,6 +612,9 @@ def poll_active_missions():
                             "dispatch_status": "REROUTED_IN_FLIGHT",
                             "route_id": reroute_data.get("route_id"),
                             "updated_eta": reroute_data.get("updated_eta"),
+                            "reroute_summary": route_summary,
+                            "detour_percentage": detour_percentage,
+                            "new_eta_minutes": new_eta_minutes,
                         },
                         timeout=10,
                     )
@@ -827,9 +857,38 @@ def _run_single_poll(order_id, mission):
     if resp.status_code == 409 or reroute_data.get("status") == "NO_VIABLE_ROUTE":
         handle_mission_abort(order_id, mission)
     else:
+        # Successful reroute - enhanced logging
+        print(f"  [REROUTE] Reroute found for {order_id}: {reroute_data.get('route_id')}")
+
+        # Extract reroute details for comprehensive logging
+        original_distance_km = reroute_data.get("original_distance_km", 0)
+        new_distance_km = reroute_data.get("distance_km", 0)
+        detour_percentage = reroute_data.get("detour_percentage", 0)
+        waypoint_count = reroute_data.get("waypoint_count", 0)
+        battery_impact_pct = reroute_data.get("additional_battery_consumption_pct", 0)
+        route_summary = reroute_data.get("route_summary", "N/A")
+        new_eta_minutes = reroute_data.get("eta_minutes", 0)
+
+        # Enhanced logging with [REROUTE] prefix
+        print(f"  [REROUTE] Distance: {original_distance_km:.2f}km → {new_distance_km:.2f}km (detour: +{detour_percentage:.1f}%)")
+        print(f"  [REROUTE] Waypoints: {waypoint_count} | Battery impact: +{battery_impact_pct:.1f}%")
+        print(f"  [REROUTE] Route summary: {route_summary}")
+        print(f"  [REROUTE] New ETA: {new_eta_minutes:.1f} minutes")
+
+        # Store comprehensive reroute details in mission object
         mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
         mission["route_id"] = reroute_data.get("route_id")
         mission["updated_eta"] = reroute_data.get("updated_eta")
+        # Store comprehensive reroute details in mission object
+        mission["reroute_details"] = {
+            "original_distance_km": original_distance_km,
+            "new_distance_km": new_distance_km,
+            "detour_percentage": detour_percentage,
+            "waypoint_count": waypoint_count,
+            "battery_impact_pct": battery_impact_pct,
+            "route_summary": route_summary,
+            "new_eta_minutes": new_eta_minutes,
+        }
         # Reset the countdown ETA to the rerouted distance's ETA
         if reroute_data.get("eta_minutes"):
             mission["eta_minutes"] = reroute_data["eta_minutes"]
@@ -843,6 +902,9 @@ def _run_single_poll(order_id, mission):
                     "dispatch_status": "REROUTED_IN_FLIGHT",
                     "route_id": reroute_data.get("route_id"),
                     "updated_eta": reroute_data.get("updated_eta"),
+                    "reroute_summary": route_summary,
+                    "detour_percentage": detour_percentage,
+                    "new_eta_minutes": new_eta_minutes,
                 },
                 timeout=10,
             )

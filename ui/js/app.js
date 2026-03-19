@@ -29,20 +29,54 @@ function addLog(message, type) {
     area.prepend(entry);
 }
 
+// ── Retry helper with exponential backoff ──────────────────────────
+
+async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const resp = await fetch(url, options);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return await resp.json();
+        } catch (e) {
+            const isLastAttempt = attempt === maxRetries;
+            const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+
+            console.error(`[Inventory Load Error] Attempt ${attempt}/${maxRetries} failed: ${e.message}`);
+
+            if (isLastAttempt) {
+                throw new Error(`Failed after ${maxRetries} attempts: ${e.message}`);
+            }
+
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+    }
+}
+
 // ── Load inventory on page load ──────────────────────────────────
 
 async function loadInventory() {
+    const select = document.getElementById("item-select");
+    const FALLBACK_ITEMS = [
+        { item_id: "BLOOD-O-NEG", name: "O-Negative Blood Bags", total_quantity: "?" },
+        { item_id: "BLOOD-A-POS", name: "A-Positive Blood Bags", total_quantity: "?" },
+        { item_id: "BLOOD-B-POS", name: "B-Positive Blood Bags", total_quantity: "?" },
+        { item_id: "DEFIB-01", name: "Portable Defibrillator", total_quantity: "?" },
+        { item_id: "EPINEPHRINE-01", name: "Epinephrine Auto-Injector", total_quantity: "?" },
+        { item_id: "ORGAN-KIT-01", name: "Organ Transport Kit", total_quantity: "?" }
+    ];
+
     try {
-        const resp = await fetch(`${API_BASE}/api/inventory/inventory/items`);
-        const items = await resp.json();
-        const select = document.getElementById("item-select");
+        const items = await fetchWithRetry(`${API_BASE}/api/inventory/inventory/items`);
         select.innerHTML = items.map(i =>
             `<option value="${i.item_id}">${i.name} (${i.item_id}) - Total: ${i.total_quantity}</option>`
         ).join("");
         addLog(`Loaded ${items.length} medical supply types`, "info");
     } catch (e) {
-        document.getElementById("item-select").innerHTML = '<option value="BLOOD-O-NEG">O-Negative Blood Bags</option><option value="DEFIB-01">Portable Defibrillator</option>';
-        addLog("Using fallback inventory list", "warn");
+        console.error("[Inventory Load Error] Using fallback items due to:", e);
+        select.innerHTML = FALLBACK_ITEMS.map(i =>
+            `<option value="${i.item_id}">${i.name} (${i.item_id}) - Total: ${i.total_quantity}</option>`
+        ).join("");
+        addLog(`Inventory API unavailable - using fallback list (${FALLBACK_ITEMS.length} items)`, "warn");
     }
 }
 
@@ -510,6 +544,12 @@ async function refreshOrders() {
                 }
             }
 
+            // Display reroute details if available
+            let rerouteDetailsHtml = "";
+            if (o.dispatch_status === "REROUTED_IN_FLIGHT" || o.reroute_details) {
+                rerouteDetailsHtml = displayRerouteDetails(o);
+            }
+
             return `
                 <div class="order-card">
                     <div class="order-header">
@@ -528,6 +568,7 @@ async function refreshOrders() {
                         ${o.route_id ? `<div>Route: <span class="order-detail-value">${o.route_id}</span></div>` : ""}
                         ${o.cancel_message ? `<div style="grid-column:1/-1; margin-top:4px; padding:8px; background:rgba(239,68,68,0.08); border-radius:6px; color:#f87171; font-size:12px;">${o.cancel_message}</div>` : ""}
                     </div>
+                    ${rerouteDetailsHtml}
                 </div>
             `;
         }).join("");
@@ -591,16 +632,28 @@ function navigateTo(page) {
 }
 
 async function loadSearchItems() {
+    const select = document.getElementById("search-item-select");
+    const FALLBACK_ITEMS = [
+        { item_id: "BLOOD-O-NEG", name: "O-Negative Blood Bags" },
+        { item_id: "BLOOD-A-POS", name: "A-Positive Blood Bags" },
+        { item_id: "BLOOD-B-POS", name: "B-Positive Blood Bags" },
+        { item_id: "DEFIB-01", name: "Portable Defibrillator" },
+        { item_id: "EPINEPHRINE-01", name: "Epinephrine Auto-Injector" },
+        { item_id: "ORGAN-KIT-01", name: "Organ Transport Kit" }
+    ];
+
     try {
-        const resp = await fetch(`${API_BASE}/api/inventory/inventory/items`);
-        const items = await resp.json();
-        const select = document.getElementById("search-item-select");
+        const items = await fetchWithRetry(`${API_BASE}/api/inventory/inventory/items`);
         select.innerHTML = '<option value="">-- Select an item --</option>' + items.map(i =>
             `<option value="${i.item_id}" data-name="${i.name}">${i.name} (${i.item_id})</option>`
         ).join("");
         searchItemsLoaded = true;
     } catch (e) {
-        document.getElementById("search-item-select").innerHTML = '<option value="">Failed to load items</option>';
+        console.error("[Search Items Load Error] Using fallback items due to:", e);
+        select.innerHTML = '<option value="">-- Select an item --</option>' + FALLBACK_ITEMS.map(i =>
+            `<option value="${i.item_id}" data-name="${i.name}">${i.name} (${i.item_id})</option>`
+        ).join("");
+        searchItemsLoaded = true;
     }
 }
 
@@ -917,13 +970,66 @@ async function disableSimulation() {
     }
 }
 
+// ── Display Reroute Details Helper ──────────────────────────────────────
+
+function displayRerouteDetails(orderData) {
+    // Check if reroute_details exists
+    if (!orderData.reroute_details) {
+        return "";
+    }
+
+    const details = orderData.reroute_details;
+    const originalDistance = Math.round(details.original_distance_km);
+    const newDistance = Math.round(details.new_distance_km);
+    const detourPercent = Math.round(details.detour_percentage);
+    const waypointCount = details.waypoint_count;
+    const additionalBattery = Math.round(details.additional_battery_consumption);
+
+    // Create styled HTML div with comprehensive reroute information
+    return `
+        <div style="margin-top:12px; padding:12px; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.3); border-radius:8px;">
+            <div style="font-size:13px; font-weight:600; color:#4ade80; margin-bottom:10px; display:flex; align-items:center; gap:6px;">
+                &#10003; Rerouted Successfully
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:12px;">
+                <div style="color:#94a3b8;">Original Distance:</div>
+                <div style="color:#e2e8f0;">${originalDistance} km</div>
+                <div style="color:#94a3b8;">New Distance:</div>
+                <div style="color:#e2e8f0;">${newDistance} km</div>
+                <div style="color:#fbbf24;">Detour:</div>
+                <div style="color:#fbbf24; font-weight:600;">+${detourPercent}%</div>
+                <div style="color:#94a3b8;">Waypoints:</div>
+                <div style="color:#e2e8f0;">${waypointCount}</div>
+                <div style="color:#94a3b8;">Additional Battery:</div>
+                <div style="color:#e2e8f0;">+${additionalBattery}%</div>
+            </div>
+        </div>
+    `;
+}
+
 async function refreshActiveMissions() {
     try {
         const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/missions`);
         const data = await resp.json();
         const missions = data.active_missions || [];
 
-        const listEl = document.getElementById("active-missions-list");
+        let listEl = document.getElementById("active-missions-list");
+
+        // Create element if it doesn't exist
+        if (!listEl) {
+            listEl = document.createElement("div");
+            listEl.id = "active-missions-list";
+            const missionTestingSection = document.querySelector('[onclick="triggerWeatherPoll()"]')?.parentElement?.parentElement;
+            if (missionTestingSection) {
+                // Insert before the action buttons
+                const actionButtons = missionTestingSection.querySelector('div[style*="display:flex"]');
+                if (actionButtons) {
+                    missionTestingSection.insertBefore(listEl, actionButtons);
+                } else {
+                    missionTestingSection.appendChild(listEl);
+                }
+            }
+        }
 
         if (missions.length === 0) {
             listEl.innerHTML = '<div class="empty-state" style="padding:16px;">No active missions. Create an order first to test weather cancellation.</div>';
@@ -933,15 +1039,42 @@ async function refreshActiveMissions() {
 
         listEl.innerHTML = `
             <div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Select a mission to test weather poll:</div>
-            ${missions.map(m => `
-                <div style="padding:10px; background:#0f172a; border:1px solid #334155; border-radius:6px; margin-bottom:8px; cursor:pointer; ${selectedMissionId === m.order_id ? 'border-color:#3b82f6; background:rgba(59,130,246,0.1);' : ''}"
-                     onclick="selectMission('${m.order_id}')" id="mission-${m.order_id}">
-                    <div style="font-weight:600; color:#f8fafc;">${m.order_id}</div>
-                    <div style="font-size:12px; color:#94a3b8; margin-top:4px;">
-                        Drone: ${m.drone_id} | Status: ${m.dispatch_status} | ETA: ${Math.round(m.eta_minutes)} min
+            ${missions.map(m => {
+                // Determine status color
+                let statusColor = "#4ade80"; // Default green for IN_FLIGHT
+                if (m.dispatch_status === "REROUTED_IN_FLIGHT") {
+                    statusColor = "#c084fc"; // Purple for rerouted
+                }
+
+                // Build reroute details HTML if available
+                let rerouteHtml = "";
+                if (m.reroute_details) {
+                    const detourPercent = Math.round(m.reroute_details.detour_percentage);
+                    const waypointCount = m.reroute_details.waypoint_count;
+                    rerouteHtml = `
+                        <div style="font-size:11px; color:#fbbf24; margin-top:4px;">
+                            &#8674; Detour: +${detourPercent}% (${waypointCount} waypoints)
+                        </div>
+                    `;
+                }
+
+                return `
+                    <div style="padding:10px; background:#0f172a; border:1px solid #334155; border-radius:6px; margin-bottom:8px; cursor:pointer; ${selectedMissionId === m.order_id ? 'border-color:#3b82f6; background:rgba(59,130,246,0.1);' : ''}"
+                         onclick="selectMission('${m.order_id}')" id="mission-${m.order_id}">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="font-weight:600; color:#f8fafc;">${m.order_id}</div>
+                            <div style="font-size:11px; padding:2px 8px; border-radius:10px; background:rgba(${m.dispatch_status === "REROUTED_IN_FLIGHT" ? "192,132,252" : "74,222,128"},0.15); color:${statusColor}; font-weight:600;">${m.dispatch_status}</div>
+                        </div>
+                        <div style="font-size:12px; color:#94a3b8; margin-top:4px;">
+                            Drone: ${m.drone_id} | ETA: ${Math.round(m.eta_minutes)} min
+                        </div>
+                        ${rerouteHtml}
+                        <button onclick="event.stopPropagation(); triggerWeatherPollForMission('${m.order_id}')" style="margin-top:8px; padding:6px 12px; background:#f59e0b; color:white; border:none; border-radius:4px; font-size:11px; font-weight:600; cursor:pointer; transition:background 0.2s;" onmouseover="this.style.background='#d97706'" onmouseout="this.style.background='#f59e0b'">
+                            &#9889; Trigger Weather Poll
+                        </button>
                     </div>
-                </div>
-            `).join("")}
+                `;
+            }).join("")}
         `;
 
         // Auto-select first mission if none selected
@@ -954,9 +1087,12 @@ async function refreshActiveMissions() {
             updateMissionSelection();
         }
     } catch (e) {
-        document.getElementById("active-missions-list").innerHTML = `
-            <div class="empty-state" style="padding:16px;">Failed to load missions: ${e.message}</div>
-        `;
+        const listEl = document.getElementById("active-missions-list");
+        if (listEl) {
+            listEl.innerHTML = `
+                <div class="empty-state" style="padding:16px;">Failed to load missions: ${e.message}</div>
+            `;
+        }
     }
 }
 
@@ -964,6 +1100,33 @@ function selectMission(orderId) {
     selectedMissionId = orderId;
     updateMissionSelection();
     addSimLog(`Selected mission: ${orderId}`);
+}
+
+async function triggerWeatherPollForMission(orderId) {
+    addSimLog(`Triggering weather poll for mission ${orderId}...`);
+
+    try {
+        const resp = await fetch(`${DISPATCH_URL}/api/dispatch/dispatch/simulate/weather`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id: orderId })
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog(`Weather poll triggered for ${orderId} - checking for unsafe conditions...`);
+            // Refresh missions after 2 second delay to allow backend processing
+            setTimeout(() => {
+                refreshActiveMissions();
+                refreshOrders();
+                addSimLog("Refreshed mission and order lists - check for reroute/abort status");
+            }, 2000);
+        } else {
+            addSimLog(`Failed to trigger weather poll: ${data.error || data.message || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`Error triggering weather poll: ${e.message}`);
+    }
 }
 
 function updateMissionSelection() {
@@ -1104,4 +1267,107 @@ function addPresetHazard(location) {
     window.hazardZones.push(zone);
     updateHazardZonesList();
     addSimLog(`Added preset hazard zone: ${preset.name}`);
+}
+
+// ── Auto-Place Hazard on Active Mission ────────────────────────────────
+
+async function autoPlaceHazard() {
+    const btn = document.getElementById("auto-hazard-btn");
+    if (!btn) return;
+
+    // Disable button and show loading state
+    btn.disabled = true;
+    btn.textContent = "Placing Hazard...";
+    btn.style.background = "#64748b";
+
+    try {
+        addSimLog("Requesting auto-hazard placement for active mission...");
+
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/auto-hazard`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+        });
+
+        const data = await resp.json();
+
+        if (resp.ok) {
+            const status = data.status;
+
+            if (status === "HAZARD_PLACED") {
+                const hazard = data.hazard;
+                addSimLog(`&#9989; Auto-placed hazard zone at (${hazard.lat.toFixed(4)}, ${hazard.lng.toFixed(4)}) with ${hazard.radius_km}km radius`);
+
+                // Update hazard zones display if zones provided
+                if (data.hazard_zones && data.hazard_zones.length > 0) {
+                    renderHazardZones(data.hazard_zones);
+                }
+
+                // Refresh mission list to show updated status
+                await refreshActiveMissions();
+
+            } else if (status === "NO_ACTIVE_MISSION") {
+                addSimLog(`&#9888; No active mission found. Please create an order first.`);
+
+            } else if (status === "MISSION_NEAR_COMPLETION") {
+                addSimLog(`&#9888; Mission is too close to destination for hazard placement (${data.remaining_distance_km.toFixed(1)}km remaining)`);
+
+            } else {
+                addSimLog(`Unexpected response status: ${status}`);
+            }
+
+        } else {
+            addSimLog(`&#10060; Failed to place hazard: ${data.message || data.error || "Unknown error"}`);
+        }
+
+    } catch (e) {
+        addSimLog(`&#10060; Error placing hazard: ${e.message}`);
+    } finally {
+        // Re-enable button
+        btn.disabled = false;
+        btn.textContent = "Auto-Place Hazard on Active Mission";
+        btn.style.background = "#3b82f6";
+    }
+}
+
+function renderHazardZones(zones) {
+    let listEl = document.getElementById("hazard-zones-list");
+
+    // Create element if it doesn't exist
+    if (!listEl) {
+        listEl = document.createElement("div");
+        listEl.id = "hazard-zones-list";
+        listEl.style.marginTop = "12px";
+        listEl.style.maxHeight = "150px";
+        listEl.style.overflowY = "auto";
+
+        // Find the hazard zones section and append the list
+        const hazardSection = document.querySelector('[onclick="addHazardZone()"]')?.parentElement?.parentElement;
+        if (hazardSection) {
+            hazardSection.appendChild(listEl);
+        }
+    }
+
+    // Show empty state if no zones
+    if (!zones || zones.length === 0) {
+        listEl.innerHTML = '<div class="empty-state" style="padding:12px; font-size:12px; color:#64748b;">No hazard zones defined. Add zones above to test grid-based rerouting.</div>';
+        return;
+    }
+
+    // Render each zone with remove button
+    listEl.innerHTML = zones.map((zone, index) => `
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 12px; background:#0f172a; border:1px solid #334155; border-radius:4px; margin-bottom:6px;">
+            <div style="font-size:11px; color:#e2e8f0;">
+                <span style="color:#f87171;">&#128165;</span>
+                (${zone.lat.toFixed(4)}, ${zone.lng.toFixed(4)}) - ${zone.radius_km}km
+            </div>
+            <button onclick="removeHazardZoneByIndex(${index})" style="padding:4px 8px; background:#dc2626; color:white; border:none; border-radius:3px; font-size:10px; cursor:pointer;">&times;</button>
+        </div>
+    `).join("");
+
+    // Update global hazard zones array
+    window.hazardZones = zones;
+}
+
+function removeHazardZoneByIndex(index) {
+    addSimLog(`&#9888; Remove hazard zone functionality not yet implemented for index ${index}`);
 }
