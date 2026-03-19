@@ -9,6 +9,7 @@ CORS(app)
 
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
+DISPATCH_URL = os.environ.get("DISPATCH_URL", "http://drone-dispatch:5002")
 
 WIND_SPEED_THRESHOLD_KMH = 40.0
 RAIN_THRESHOLD_MM = 10.0
@@ -142,6 +143,161 @@ def simulation_status():
         "simulation_enabled": simulation_mode["enabled"],
         "config": simulation_mode if simulation_mode["enabled"] else None
     })
+
+
+def calculate_flight_path_midpoint(current_coords, destination_coords):
+    """
+    Calculate the midpoint between two coordinates.
+
+    Args:
+        current_coords: Dict with 'lat' and 'lng' keys
+        destination_coords: Dict with 'lat' and 'lng' keys
+
+    Returns:
+        Dict with 'lat' and 'lng' rounded to 6 decimal places
+    """
+    lat = (current_coords["lat"] + destination_coords["lat"]) / 2
+    lng = (current_coords["lng"] + destination_coords["lng"]) / 2
+    return {"lat": round(lat, 6), "lng": round(lng, 6)}
+
+
+def fetch_active_mission():
+    """
+    Fetch the first active mission from the drone dispatch service.
+
+    Returns:
+        Mission dict if found, None if no active mission or on error
+    """
+    try:
+        resp = http_requests.get(f"{DISPATCH_URL}/dispatch/missions", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        missions = data.get("active_missions", [])
+
+        # Return first mission with IN_FLIGHT or REROUTED_IN_FLIGHT status
+        for mission in missions:
+            dispatch_status = mission.get("dispatch_status")
+            if dispatch_status in ("IN_FLIGHT", "REROUTED_IN_FLIGHT"):
+                return mission
+
+        return None
+    except Exception as e:
+        print(f"  [AUTO_HAZARD] Failed to fetch active mission: {e}")
+        return None
+
+
+@app.route("/weather/simulate/auto-hazard", methods=["POST"])
+@app.route("/simulate/auto-hazard", methods=["POST"])  # For Kong gateway (strip_path)
+def auto_hazard():
+    """
+    Automatically calculate and place a hazard zone on an active drone's flight path.
+
+    This endpoint:
+    1. Auto-enables simulation mode if not enabled
+    2. Fetches the first active IN_FLIGHT or REROUTED_IN_FLIGHT mission
+    3. Validates ETA is >= 2 minutes (too late to reroute if less)
+    4. Calculates midpoint of current_coords to customer_coords
+    5. Creates a hazard zone at that midpoint
+    6. Returns comprehensive response with mission details
+    """
+    global simulation_mode
+
+    # Auto-enable simulation mode if not enabled
+    if not simulation_mode["enabled"]:
+        simulation_mode["enabled"] = True
+        simulation_mode["force_unsafe"] = True
+        simulation_mode["unsafe_reason"] = ["HIGH_WIND"]
+        simulation_mode["wind_speed_kmh"] = 65.0
+        simulation_mode["rain_mm"] = 15.0
+        print(f"  [AUTO_HAZARD] Auto-enabled simulation mode")
+
+    # Fetch active mission
+    mission = fetch_active_mission()
+    if not mission:
+        return jsonify({
+            "error": "No active missions found",
+            "message": "No missions with dispatch_status IN_FLIGHT or REROUTED_IN_FLIGHT",
+            "suggestion": "Create an order and wait for it to be dispatched"
+        }), 404
+
+    # Validate ETA (must be >= 2 minutes to have time to reroute)
+    eta_minutes = mission.get("eta_minutes", 0)
+    if eta_minutes < 2:
+        return jsonify({
+            "error": "Mission ETA too low",
+            "message": f"Mission ETA is {eta_minutes:.1f} minutes, minimum 2 minutes required for rerouting",
+            "mission_details": {
+                "order_id": mission.get("order_id"),
+                "drone_id": mission.get("drone_id"),
+                "eta_minutes": eta_minutes,
+                "dispatch_status": mission.get("dispatch_status")
+            }
+        }), 400
+
+    # Get request parameters for hazard configuration
+    data = request.get_json() or {}
+    radius_km = data.get("radius_km", 2.0)
+
+    # Extract coordinates
+    current_coords = mission.get("current_coords")
+    customer_coords = mission.get("customer_coords")
+
+    if not current_coords or not customer_coords:
+        return jsonify({
+            "error": "Mission coordinates missing",
+            "message": "Mission does not have current_coords or customer_coords",
+            "mission_details": mission
+        }), 400
+
+    # Calculate hazard zone at midpoint
+    hazard_zone = calculate_flight_path_midpoint(current_coords, customer_coords)
+    hazard_zone["radius_km"] = radius_km
+
+    # Add to simulation hazard zones
+    simulation_mode["hazard_zones"].append(hazard_zone)
+
+    # Calculate flight path progress
+    initial_eta = mission.get("initial_eta", eta_minutes)
+    if initial_eta > 0:
+        progress_pct = round((1 - (eta_minutes / initial_eta)) * 100, 1)
+    else:
+        progress_pct = 0.0
+
+    print(f"  [AUTO_HAZARD] Hazard zone created at {hazard_zone['lat']}, {hazard_zone['lng']} for mission {mission.get('order_id')}")
+    print(f"  [AUTO_HAZARD] Mission progress: {progress_pct}%, ETA: {eta_minutes:.1f}min")
+
+    return jsonify({
+        "status": "HAZARD_ZONE_CREATED",
+        "hazard_zone": {
+            "center": {
+                "lat": hazard_zone["lat"],
+                "lng": hazard_zone["lng"]
+            },
+            "radius_km": radius_km
+        },
+        "based_on_mission": {
+            "order_id": mission.get("order_id"),
+            "drone_id": mission.get("drone_id"),
+            "dispatch_status": mission.get("dispatch_status"),
+            "progress_percentage": progress_pct,
+            "eta_minutes": eta_minutes,
+            "flight_path": {
+                "current": current_coords,
+                "destination": customer_coords,
+                "midpoint": {
+                    "lat": round((current_coords["lat"] + customer_coords["lat"]) / 2, 6),
+                    "lng": round((current_coords["lng"] + customer_coords["lng"]) / 2, 6)
+                }
+            }
+        },
+        "simulation_config": {
+            "enabled": simulation_mode["enabled"],
+            "force_unsafe": simulation_mode["force_unsafe"],
+            "total_hazard_zones": len(simulation_mode["hazard_zones"]),
+            "all_hazard_zones": simulation_mode["hazard_zones"]
+        },
+        "message": f"Hazard zone placed at flight path midpoint ({progress_pct}% complete). Rerouting will trigger on next weather poll."
+    }), 200
 
 
 @app.route("/weather/check", methods=["GET"])
