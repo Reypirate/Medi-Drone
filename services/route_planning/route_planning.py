@@ -131,7 +131,7 @@ def plan_route():
 def astar_reroute(current, destination, hazard_zone, max_detour_minutes=10):
     """
     A* pathfinding on a lat/lng grid, avoiding a circular hazard zone.
-    Returns a list of waypoints or None if no viable route exists.
+    Returns (waypoints, distance_km, metadata) or None if no viable route exists.
     """
     hz_center = hazard_zone.get("center", {})
     hz_lat, hz_lng = hz_center.get("lat", 0), hz_center.get("lng", 0)
@@ -142,8 +142,8 @@ def astar_reroute(current, destination, hazard_zone, max_detour_minutes=10):
     goal = (round(destination["lat"] / GRID_RESOLUTION) * GRID_RESOLUTION,
             round(destination["lng"] / GRID_RESOLUTION) * GRID_RESOLUTION)
 
-    direct_dist = haversine(start[0], start[1], goal[0], goal[1])
-    max_detour_km = (max_detour_minutes / 60) * DRONE_SPEED_KMH + direct_dist
+    original_direct_distance = haversine(start[0], start[1], goal[0], goal[1])
+    max_detour_km = (max_detour_minutes / 60) * DRONE_SPEED_KMH + original_direct_distance
 
     def is_in_hazard(lat, lng):
         return haversine(lat, lng, hz_lat, hz_lng) < hz_radius
@@ -197,10 +197,21 @@ def astar_reroute(current, destination, hazard_zone, max_detour_minutes=10):
                     waypoints.append(path[i])
             waypoints.append(path[-1])
 
+            detour_distance_km = total_dist - original_direct_distance
+            detour_percentage = (detour_distance_km / original_direct_distance * 100) if original_direct_distance > 0 else 0
+            additional_battery_pct = detour_distance_km * BASE_CONSUMPTION_PER_KM
+
+            metadata = {
+                "original_distance_km": round(original_direct_distance, 1),
+                "detour_distance_km": round(detour_distance_km, 1),
+                "detour_percentage": round(detour_percentage, 1),
+                "additional_battery_consumption_pct": round(additional_battery_pct, 1),
+            }
+
             return [{
                 "lat": round(w[0], 4),
                 "lng": round(w[1], 4),
-            } for w in waypoints], round(total_dist, 1)
+            } for w in waypoints], round(total_dist, 1), metadata
 
         total_path_dist = sum(
             haversine(path[i][0], path[i][1], path[i + 1][0], path[i + 1][1])
@@ -241,12 +252,18 @@ def reroute():
             "reason": "No safe route available within current weather and flight constraints",
         }), 409
 
-    waypoints, distance_km = result
+    waypoints, distance_km, metadata = result
     eta_minutes = round((distance_km / DRONE_SPEED_KMH) * 60)
 
     from datetime import datetime, timedelta, timezone
     sg_tz = timezone(timedelta(hours=8))
     updated_eta = (datetime.now(sg_tz) + timedelta(minutes=eta_minutes)).isoformat()
+
+    estimated_arrival_battery_pct = max(20, 80 - metadata["additional_battery_consumption_pct"])
+
+    hz_center = hazard_zone.get("center", {})
+    hz_radius = hazard_zone.get("radius_km", 2.0)
+    hazard_type = hazard_zone.get("type", "weather")
 
     return jsonify({
         "status": "REROUTE_FOUND",
@@ -257,6 +274,32 @@ def reroute():
         "updated_eta": updated_eta,
         "distance_km": distance_km,
         "eta_minutes": eta_minutes,
+        "original_distance_km": metadata["original_distance_km"],
+        "detour_distance_km": metadata["detour_distance_km"],
+        "detour_percentage": metadata["detour_percentage"],
+        "waypoint_count": len(waypoints),
+        "additional_battery_consumption_pct": metadata["additional_battery_consumption_pct"],
+        "estimated_arrival_battery_pct": round(estimated_arrival_battery_pct, 1),
+        "route_summary": {
+            "original_path": {
+                "start": {"lat": round(current_coords.get("lat", 0), 4), "lng": round(current_coords.get("lng", 0), 4)},
+                "end": {"lat": round(destination_coords.get("lat", 0), 4), "lng": round(destination_coords.get("lng", 0), 4)},
+                "distance_km": metadata["original_distance_km"],
+            },
+            "new_path": {
+                "waypoints": waypoints,
+                "distance_km": distance_km,
+            },
+            "reason_for_detour": f"Hazard zone detected at ({hz_center.get('lat', 0):.4f}, {hz_center.get('lng', 0):.4f}) with {hz_radius}km radius",
+        },
+        "hazards_avoided": [
+            {
+                "lat": hz_center.get("lat", 0),
+                "lng": hz_center.get("lng", 0),
+                "radius_km": hz_radius,
+                "type": hazard_type,
+            }
+        ],
     })
 
 
