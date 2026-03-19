@@ -11,6 +11,14 @@ GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 geocode_cache = {}
+MAX_CACHE_SIZE = 500
+
+
+def _evict_cache():
+    """Evict the oldest half of cache entries when the cache is full."""
+    evict_count = len(geocode_cache) // 2
+    for key in list(geocode_cache.keys())[:evict_count]:
+        del geocode_cache[key]
 
 SG_BOUNDS = {"lat_min": 1.15, "lat_max": 1.47, "lng_min": 103.60, "lng_max": 104.05}
 
@@ -98,6 +106,8 @@ def geocode():
 
     if not GOOGLE_MAPS_API_KEY:
         coords, formatted = fallback_geocode(address)
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[addr_hash] = {
             "coords": coords, "formatted_address": formatted,
             "country": "Singapore", "postal_code": "",
@@ -133,6 +143,8 @@ def geocode():
         country, postal_code = extract_address_components(result)
 
         coords = {"lat": location["lat"], "lng": location["lng"]}
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[addr_hash] = {
             "coords": coords, "formatted_address": formatted,
             "country": country, "postal_code": postal_code,
@@ -145,6 +157,8 @@ def geocode():
     except Exception as e:
         print(f"  [GEOCODE] API call failed: {e} — using fallback for: {address}")
         coords, formatted = fallback_geocode(address)
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[addr_hash] = {
             "coords": coords, "formatted_address": formatted,
             "country": "Singapore", "postal_code": "",
@@ -179,6 +193,8 @@ def reverse_geocode():
         region_valid = is_within_singapore(lat, lng)
         formatted = f"{lat}, {lng} (Singapore)" if region_valid else f"{lat}, {lng}"
         country = "Singapore" if region_valid else "Unknown"
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[cache_key] = {
             "coords": coords, "formatted_address": formatted,
             "country": country, "postal_code": "",
@@ -212,6 +228,8 @@ def reverse_geocode():
         formatted = result.get("formatted_address", f"{lat}, {lng}")
         country, postal_code = extract_address_components(result)
 
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[cache_key] = {
             "coords": coords, "formatted_address": formatted,
             "country": country, "postal_code": postal_code,
@@ -226,6 +244,8 @@ def reverse_geocode():
         region_valid = is_within_singapore(lat, lng)
         formatted = f"{lat}, {lng} (Singapore)" if region_valid else f"{lat}, {lng}"
         country = "Singapore" if region_valid else "Unknown"
+        if len(geocode_cache) >= MAX_CACHE_SIZE:
+            _evict_cache()
         geocode_cache[cache_key] = {
             "coords": coords, "formatted_address": formatted,
             "country": country, "postal_code": "",
