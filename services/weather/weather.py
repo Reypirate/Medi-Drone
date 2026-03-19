@@ -96,6 +96,47 @@ def haversine_distance(lat1, lng1, lat2, lng2):
     return 2 * 6371.0 * asin(sqrt(a))
 
 
+def merge_hazard_zones(hazard_zones):
+    """
+    Merge multiple hazard zones into a single bounding zone.
+
+    Args:
+        hazard_zones: List of dicts with 'lat', 'lng', 'radius_km' keys
+
+    Returns:
+        None if no zones, single zone if only one, or merged zone with
+        center at geometric center and radius covering all zones
+    """
+    if not hazard_zones:
+        return None
+
+    if len(hazard_zones) == 1:
+        return hazard_zones[0]
+
+    # Calculate geometric center (average lat/lng)
+    total_lat = sum(zone["lat"] for zone in hazard_zones)
+    total_lng = sum(zone["lng"] for zone in hazard_zones)
+    center_lat = total_lat / len(hazard_zones)
+    center_lng = total_lng / len(hazard_zones)
+
+    # Calculate maximum radius needed to encompass all zones
+    max_radius = 0.0
+    for zone in hazard_zones:
+        distance_to_center = haversine_distance(
+            center_lat, center_lng,
+            zone["lat"], zone["lng"]
+        )
+        total_distance = distance_to_center + zone.get("radius_km", 2.0)
+        if total_distance > max_radius:
+            max_radius = total_distance
+
+    return {
+        "lat": round(center_lat, 6),
+        "lng": round(center_lng, 6),
+        "radius_km": round(max_radius, 1)
+    }
+
+
 # ---------------------------------------------------------------------------
 # Simulation endpoints for testing
 # ---------------------------------------------------------------------------
@@ -390,22 +431,24 @@ def live_corridor_check():
                         detected_hazards.append(zone)
 
                 if detected_hazards:
-                    # Return the first detected hazard zone for rerouting
-                    primary_hazard = detected_hazards[0]
-                    print(f"  [SIMULATION] Grid-based hazard detected for order {order_id}: {len(detected_hazards)} zone(s)")
+                    # Merge multiple hazard zones into single bounding zone
+                    merged_hazard = merge_hazard_zones(detected_hazards)
+                    print(f"  [SIMULATION] Merged {len(detected_hazards)} hazard zones into single bounding zone")
+                    print(f"  [SIMULATION] Merged hazard: center=({merged_hazard['lat']},{merged_hazard['lng']}), radius={merged_hazard['radius_km']}km")
                     return jsonify({
                         "status": "UNSAFE",
                         "reason": simulation_mode["unsafe_reason"],
                         "wind_kmh": simulation_mode["wind_speed_kmh"],
                         "hazard_zone": {
-                            "center": {"lat": primary_hazard["lat"], "lng": primary_hazard["lng"]},
-                            "radius_km": primary_hazard.get("radius_km", 2.0),
+                            "center": {"lat": merged_hazard["lat"], "lng": merged_hazard["lng"]},
+                            "radius_km": merged_hazard["radius_km"],
                         },
                         "recommended_action": "REROUTE",
                         "order_id": order_id,
                         "drone_id": drone_id,
-                        "source": "SIMULATION_GRID",
-                        "detected_hazards": len(detected_hazards),
+                        "source": "SIMULATION_GRID_MERGED",
+                        "hazards_detected": len(detected_hazards),
+                        "hazards_merged": True,
                     })
                 else:
                     # No hazard detected on flight path - safe to proceed
