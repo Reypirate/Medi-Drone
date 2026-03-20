@@ -457,7 +457,7 @@ async function confirmDeleteAllOrders() {
         let orders = data.orders || [];
 
         if (currentOrderTab === "active") {
-            orders = orders.filter(o => o.status === "DISPATCHED" || o.status === "IN_TRANSIT");
+            orders = orders.filter(o => ["TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED"].includes(o.status));
         }
 
         if (orders.length === 0) {
@@ -512,7 +512,7 @@ async function refreshOrders() {
 
         // For active tab, also filter by status
         if (currentOrderTab === "active") {
-            orders = orders.filter(o => ["CONFIRMED", "DISPATCHED", "IN_TRANSIT"].includes(o.status));
+            orders = orders.filter(o => ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED"].includes(o.status));
         }
 
         const list = document.getElementById("orders-list");
@@ -536,11 +536,25 @@ async function refreshOrders() {
 
         list.innerHTML = orders.reverse().map(o => {
             const badgeClass = getBadgeClass(o.status);
+            const badgeLabel = getBadgeLabel(o.status);
+            const missionPhase = o.mission_phase || o.dispatch_status;
 
             // Display ETA countdown for dispatched orders
             let etaDisplay = "";
+            let phaseDisplay = "";
+
             if (o.eta_minutes !== undefined && o.eta_minutes !== null) {
                 const eta = Math.max(0, o.eta_minutes);
+                // Determine phase label from mission_phase field (not dispatch_status)
+                const phase = o.mission_phase || o.status;
+                let phaseLabel = "Unknown";
+                if (phase === "TO_HOSPITAL") phaseLabel = "to Hospital";
+                else if (phase === "TO_CUSTOMER") phaseLabel = "to Customer";
+                else if (phase === "IN_TRANSIT" || phase === "IN_FLIGHT") phaseLabel = "in transit";
+                else if (phase.includes("REROUTE")) phaseLabel = "rerouting";
+                else phaseLabel = phase.toLowerCase().replace(/_/g, " ");
+
+                phaseDisplay = `<div style="color:#64748b; font-size:11px; grid-column:1/-1;">Phase: ${phaseLabel}</div>`;
                 etaDisplay = `<div>ETA: <span class="order-detail-value" style="color:${eta <= 5 ? '#f87171' : eta <= 10 ? '#fbbf24' : '#4ade80'}">${eta} min</span></div>`;
                 if (eta <= 0 && o.status !== "DELIVERED") {
                     etaDisplay += `<div style="color:#4ade80; font-size:11px; grid-column:1/-1;">&#10003; Delivered!</div>`;
@@ -557,7 +571,7 @@ async function refreshOrders() {
                 <div class="order-card">
                     <div class="order-header">
                         <span class="order-id">${o.order_id}</span>
-                        <span class="badge ${badgeClass}">${o.status}</span>
+                        <span class="badge ${badgeClass}">${badgeLabel}</span>
                         ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
                     </div>
                     <div class="order-details">
@@ -566,6 +580,7 @@ async function refreshOrders() {
                         <div>Qty: <span class="order-detail-value">${o.quantity}</span></div>
                         <div>Urgency: <span class="order-detail-value">${o.urgency_level}</span></div>
                         ${o.drone_id ? `<div>Drone: <span class="order-detail-value">${o.drone_id}</span></div>` : ""}
+                        ${phaseDisplay}
                         ${etaDisplay}
                         ${o.dispatch_status ? `<div>Dispatch: <span class="order-detail-value">${o.dispatch_status}</span></div>` : ""}
                         ${o.route_id ? `<div>Route: <span class="order-detail-value">${o.route_id}</span></div>` : ""}
@@ -580,12 +595,30 @@ async function refreshOrders() {
     }
 }
 
+function getBadgeLabel(status) {
+    if (!status) return "Pending";
+    const s = status.toUpperCase();
+    if (s === "CONFIRMED") return "Confirmed";
+    if (s === "DISPATCHED") return "Dispatched";
+    if (s === "TO_HOSPITAL") return "To Hospital";
+    if (s === "TO_CUSTOMER") return "To Customer";
+    if (s === "IN_TRANSIT" || s === "IN_FLIGHT") return "In Transit";
+    if (s === "DELIVERED") return "Delivered";
+    if (s.includes("REROUTE")) return "Rerouted";
+    if (s.includes("FAIL") || s.includes("ERROR")) return "Failed";
+    if (s.includes("CANCEL")) return "Cancelled";
+    return status;
+}
+
 function getBadgeClass(status) {
     if (!status) return "badge-pending";
     const s = status.toUpperCase();
     if (s === "CONFIRMED") return "badge-confirmed";
     if (s === "DISPATCHED") return "badge-dispatched";
+    if (s === "TO_HOSPITAL") return "badge-to-hospital";
+    if (s === "TO_CUSTOMER") return "badge-to-customer";
     if (s === "IN_TRANSIT") return "badge-transit";
+    if (s === "IN_FLIGHT") return "badge-to-customer";  // Backward compatibility
     if (s === "DELIVERED") return "badge-delivered";
     if (s.includes("REROUTE")) return "badge-rerouted";
     if (s.includes("FAIL") || s.includes("ERROR")) return "badge-failed";

@@ -319,8 +319,14 @@ def dispatch_update():
     order["dispatch_status"] = data.get("dispatch_status", order.get("dispatch_status"))
     order["eta_minutes"] = data.get("eta_minutes", order.get("eta_minutes"))
 
+    # Always update mission_phase if provided
+    if "mission_phase" in data:
+        order["mission_phase"] = data["mission_phase"]
+
     if data.get("dispatch_status") == "REROUTED_IN_FLIGHT":
-        order["status"] = "IN_TRANSIT"
+        # Preserve the mission phase (TO_HOSPITAL or TO_CUSTOMER) when rerouting
+        mission_phase = data.get("mission_phase", order.get("mission_phase", order.get("status", "TO_CUSTOMER")))
+        order["status"] = mission_phase  # Keep phase badge (To Hospital or To Customer)
         order["route_id"] = data.get("route_id")
         order["updated_eta"] = data.get("updated_eta")
 
@@ -342,16 +348,22 @@ def dispatch_confirm():
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
 
-    order["status"] = "DISPATCHED"
-    order["drone_id"] = data.get("drone_id")
-    order["eta_minutes"] = data.get("eta_minutes")
-    order["dispatch_status"] = data.get("status", "DISPATCHED")
+    drone_id = data.get("drone_id")
+    eta_minutes = data.get("eta_minutes")
+    dispatch_status = data.get("status", "TO_HOSPITAL")  # Drone dispatch sends TO_HOSPITAL status
+    mission_phase = data.get("mission_phase", dispatch_status)  # Get mission phase if provided
+
+    order["status"] = dispatch_status  # Main status reflects mission phase
+    order["mission_phase"] = mission_phase  # Store mission phase separately
+    order["drone_id"] = drone_id
+    order["eta_minutes"] = eta_minutes
+    order["dispatch_status"] = dispatch_status
 
     return jsonify({
         "order_id": order_id,
-        "status": "DISPATCHED",
-        "drone_id": order["drone_id"],
-        "eta_minutes": order["eta_minutes"],
+        "status": dispatch_status,
+        "drone_id": drone_id,
+        "eta_minutes": eta_minutes,
     })
 
 
@@ -458,7 +470,7 @@ def list_orders():
 
     if status_filter:
         if status_filter == "active":
-            filtered_orders = [o for o in filtered_orders if o.get("status") in ("DISPATCHED", "IN_TRANSIT")]
+            filtered_orders = [o for o in filtered_orders if o.get("status") in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED")]
         elif status_filter == "cancelled":
             filtered_orders = [o for o in filtered_orders if o.get("status", "").startswith("CANCELLED")]
         elif status_filter == "completed":
@@ -477,7 +489,7 @@ def delete_order(order_id):
     current_status = order.get("status")
 
     # Cannot delete active orders
-    if current_status in ("DISPATCHED", "IN_TRANSIT", "CONFIRMED", "PENDING"):
+    if current_status in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED", "CONFIRMED", "PENDING"):
         return jsonify({
             "error": "Cannot delete active order",
             "order_id": order_id,

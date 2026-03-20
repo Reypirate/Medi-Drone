@@ -21,3 +21,6 @@ node_modules/
 CLAUDE.md
 memory/
 docs/
+
+# Development scripts
+scripts/

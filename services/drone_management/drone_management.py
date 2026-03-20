@@ -1,3 +1,19 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# DRONE MANAGEMENT SERVICE
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ⚠️  DOCUMENTATION REMINDER ⚠️
+# When modifying this file, please run: python scripts/sync_docs.py
+# to check if documentation (README.md, docs/system-flow.md) needs updates.
+#
+# Key areas that require documentation updates:
+# - New endpoints: Add to API endpoints section
+# - New drone statuses: Update Drone Status Lifecycle section
+# - Battery threshold changes: Update LOW_BATTERY_THRESHOLD value
+# - New fields: Add to database schema section
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
 import os
 import time
 import mysql.connector

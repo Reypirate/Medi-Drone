@@ -195,7 +195,7 @@ The Medi-Drone Web UI provides four main sections for managing emergency medical
 2. View individual drone status:
    - **Operational:** Green circle icon, ready for dispatch
    - **In Flight:** Purple plane icon, showing mission details and ETA
-   - **Low Battery:** Orange battery icon (<30% charge)
+   - **Low Battery:** Orange battery icon (<30% display, auto-charging at <40%)
    - **Faulty:** Red warning icon
 
 3. Each drone card shows:
@@ -203,6 +203,12 @@ The Medi-Drone Web UI provides four main sections for managing emergency medical
    - Battery percentage with visual bar
    - Current GPS coordinates
    - Active mission details (if in flight)
+
+**Automatic Battery Management:**
+- Drones with battery <40% automatically sent to depot for charging
+- Charging takes ~1 minute (2 polling cycles)
+- Battery reset to 100% after charging completes
+- Charging drones are unavailable for dispatch
 
 ### Simulation Tab
 
@@ -293,7 +299,14 @@ If any step fails (no drones, unsafe weather, no viable route), compensating tra
 - Weather Service detects hazard zone on flight path
 - Route Planning Service uses A* pathfinding to calculate alternate route
 - Mission continues with new waypoints avoiding the hazard
-- Order updated with detour percentage, waypoints, and battery impact
+- Order updated with comprehensive reroute details:
+  - `original_distance_km`: Original flight distance in km
+  - `new_distance_km`: New distance after reroute in km
+  - `detour_percentage`: Percentage increase in distance
+  - `waypoint_count`: Number of waypoints in new route
+  - `additional_battery_consumption_pct`: Extra battery needed
+  - `route_summary`: A* pathfinding result description
+  - `new_eta_minutes`: Updated estimated time of arrival
 
 ### Scenario 3.2: Mid-Flight Cancellation
 
@@ -467,6 +480,26 @@ If you see MySQL connection errors:
 - **Containerization:** Docker, Docker Compose
 - **External APIs:** Twilio (SMS), OpenWeatherMap, Google Maps Geocoding
 
+## Mission Types
+
+The system tracks three types of missions in the active missions registry:
+
+1. **Delivery Missions** (key: `order_id`)
+   - Standard delivery from hospital to customer
+   - Status: IN_FLIGHT or REROUTED_IN_FLIGHT
+   - Tracks ETA, position, reroute details
+
+2. **Return to Depot Missions** (key: `{order_id}_return`)
+   - Drone returning to depot after successful delivery
+   - Status: RETURNING_TO_DEPOT
+   - Automatically transitions to charging upon arrival
+
+3. **Low Battery Charging Missions** (key: `{drone_id}_charging`)
+   - Drone charging at depot due to low battery (<40%)
+   - Status: CHARGING
+   - Removed after 2 polling cycles (~1 minute)
+   - Drone status set to AVAILABLE with 100% battery
+
 ## Beyond-the-Labs (BTL) Components
 
 1. **Kong API Gateway** - Centralized routing, CORS handling, and request proxying for all microservices
@@ -483,6 +516,10 @@ Medi-Drone/
 ├── .env                        # Your actual API keys (not in git)
 ├── README.md
 ├── CLAUDE.md                   # Additional documentation for Claude Code
+├── scripts/
+│   ├── sync_docs.py            # Documentation sync utility
+│   ├── check_docs.bat          # Windows: Check documentation gaps
+│   └── check_docs.sh           # Unix/Linux/macOS: Check documentation gaps
 ├── kong/
 │   └── kong.yml                # Kong declarative config
 ├── services/
@@ -509,6 +546,34 @@ Medi-Drone/
     └── js/
         └── app.js              # Frontend logic with weather simulation
 ```
+
+## Keeping Documentation Updated
+
+After making code changes to any service, run the documentation sync utility to check for gaps:
+
+**Windows:**
+```bash
+scripts\check_docs.bat
+```
+
+**Unix/Linux/macOS:**
+```bash
+chmod +x scripts/check_docs.sh
+./scripts/check_docs.sh
+```
+
+**Python directly:**
+```bash
+python scripts/sync_docs.py
+python scripts/sync_docs.py --verbose  # Detailed output
+python scripts/sync_docs.py --output docs/gap_report.json  # Export report
+```
+
+The utility scans for:
+- New API endpoints
+- Changes to constants (battery threshold, poll interval)
+- New mission types or drone statuses
+- Missing documentation for key features like race condition prevention
 
 ## License
 

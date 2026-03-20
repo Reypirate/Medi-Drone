@@ -81,6 +81,12 @@ services:
     container_name: inventory
     ports:
       - "5003:5003"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     environment:
       MYSQL_HOST: mysql-inventory
       MYSQL_PORT: 3306
@@ -96,6 +102,12 @@ services:
     container_name: hospital
     ports:
       - "5005:5005"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     environment:
       MYSQL_HOST: mysql-hospital
       MYSQL_PORT: 3306
@@ -111,6 +123,12 @@ services:
     container_name: drone-management
     ports:
       - "5008:5008"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     environment:
       MYSQL_HOST: mysql-drone
       MYSQL_PORT: 3306
@@ -257,10 +275,25 @@ services:
       KONG_PROXY_LISTEN: 0.0.0.0:8000
     volumes:
       - ./kong:/kong
+    # Use tmpfs for sockets to prevent stale socket files on restart
+    tmpfs:
+      - /usr/local/kong/sockets:uid=1000,gid=1000
     ports:
       - "8000:8000"
       - "8001:8001"
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     depends_on:
+      inventory:
+        condition: service_healthy
+      hospital:
+        condition: service_healthy
+      drone-management:
+        condition: service_healthy
       order:
         condition: service_healthy
       drone-dispatch:

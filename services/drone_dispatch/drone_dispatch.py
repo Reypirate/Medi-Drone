@@ -1,3 +1,19 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# DRONE DISPATCH SERVICE
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ⚠️  DOCUMENTATION REMINDER ⚠️
+# When modifying this file, please run: python scripts/sync_docs.py
+# to check if documentation (README.md, docs/system-flow.md) needs updates.
+#
+# Key areas that require documentation updates:
+# - New endpoints: Add to API endpoints section
+# - New mission types: Add to Mission Types section
+# - Changed constants (battery threshold, poll interval): Update values
+# - New features: Describe in appropriate scenario sections
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
 import os
 import json
 import time
@@ -40,6 +56,7 @@ active_missions = {}
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL", 30))
 MAX_DELIVERY_DISTANCE_KM = 50
 EARTH_RADIUS_KM = 6371.0
+DRONE_SPEED_KMH = 36.0  # Drone cruise speed in km/h
 
 # Global lock for drone reservation to prevent race conditions
 drone_reservation_lock = threading.Lock()
@@ -218,6 +235,23 @@ def dispatch_order(order_data):
         order_drone_reservations[order_id] = selected_drone
         print(f"  [DISPATCH] Reserved drone {selected_drone} for order {order_id}")
 
+    # Get drone start coordinates for phase 1 (needed for ETA calculation and confirm call)
+    drone_start_coords = None
+    for d in available_drones:
+        if d["drone_id"] == selected_drone:
+            drone_start_coords = {"lat": d["coords"]["lat"], "lng": d["coords"]["lng"]}
+            break
+
+    if not drone_start_coords:
+        drone_start_coords = hospital_coords  # Fallback to hospital if not found
+
+    # Calculate Phase 1 ETA: drone start → hospital (needed for confirm call)
+    distance_to_hospital = haversine(
+        drone_start_coords["lat"], drone_start_coords["lng"],
+        hospital_coords["lat"], hospital_coords["lng"]
+    )
+    hospital_eta = round((distance_to_hospital / DRONE_SPEED_KMH) * 60)
+
     # Step 6: Update drone status to IN_FLIGHT with position tracking
     try:
         http_requests.patch(
@@ -241,33 +275,42 @@ def dispatch_order(order_data):
             json={
                 "order_id": order_id,
                 "drone_id": selected_drone,
-                "eta_minutes": eta_minutes,
-                "status": "DISPATCHED",
+                "eta_minutes": hospital_eta,
+                "status": "TO_HOSPITAL",
+                "mission_phase": "TO_HOSPITAL",  # Explicitly set mission phase
             },
             timeout=10,
         )
     except Exception as e:
         print(f"  [DISPATCH] Warning: could not confirm with order service: {e}")
 
-    print(f"  [DISPATCH] Order {order_id} dispatched: drone={selected_drone}, ETA={eta_minutes}min")
+    print(f"  [DISPATCH] Order {order_id} dispatched: drone={selected_drone}, Hospital ETA={hospital_eta}min, Customer ETA={eta_minutes}min")
 
     # Initialize the active_missions entry with full mission details
+    # MISSION PHASES:
+    # 1. TO_HOSPITAL: Drone flying from its current location to hospital to pick up supplies
+    # 2. TO_CUSTOMER: Drone flying from hospital to customer to deliver supplies
     active_missions[order_id] = {
         "order_id": order_id,
         "drone_id": selected_drone,
+        "drone_start_coords": drone_start_coords,
         "hospital_coords": hospital_coords,
         "customer_coords": customer_coords,
-        "current_coords": hospital_coords.copy(),
-        "dispatch_status": "IN_FLIGHT",
-        "eta_minutes": eta_minutes,
-        "initial_eta": eta_minutes,  # Store for progress calculation
+        "current_coords": drone_start_coords.copy(),  # Start at actual drone position
+        "dispatch_status": "TO_HOSPITAL",  # Start with phase 1: drone → hospital
+        "mission_phase": "TO_HOSPITAL",
+        "eta_minutes": hospital_eta,  # Start countdown with hospital ETA
+        "initial_eta": hospital_eta + eta_minutes,  # Total mission time
         "payload_weight": payload_weight,
+        "hospital_eta_minutes": hospital_eta,  # ETA to reach hospital
+        "customer_eta_minutes": eta_minutes,  # ETA from hospital to customer
     }
+
     # Drone is now in active_missions, so remove from reservation tracking
     with drone_reservation_lock:
         reserved_drones.discard(selected_drone)
         order_drone_reservations.pop(order_id, None)
-    print(f"  [MISSIONS] Mission fully initialized: {order_id} | Active missions: {len(active_missions)}")
+    print(f"  [MISSIONS] Mission initialized: {order_id} | Phase: TO_HOSPITAL | Hospital ETA: {hospital_eta}min, Customer ETA: {eta_minutes}min | Total: {hospital_eta + eta_minutes}min")
 
 
 CANCEL_MESSAGES = {
@@ -466,8 +509,90 @@ def poll_active_missions():
                     print(f"  [CHARGING] Drone {mission['drone_id']} charging from low battery... cycle {mission.get('charging_cycles', 0)}/2")
                 continue
 
-            if mission["dispatch_status"] not in ("IN_FLIGHT", "REROUTED_IN_FLIGHT"):
+            # Skip missions that are not in active delivery phases
+            if mission["dispatch_status"] not in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_FLIGHT", "REROUTED_IN_FLIGHT"):
                 continue
+
+            # MISSION PHASE HANDLING
+            mission_phase = mission.get("mission_phase", mission["dispatch_status"])
+
+            # Phase 1: Drone flying to hospital to pick up supplies
+            if mission_phase == "TO_HOSPITAL" or mission["dispatch_status"] == "TO_HOSPITAL":
+                hospital_eta = mission.get("hospital_eta_minutes", 0)
+                if hospital_eta <= 0:
+                    # Reached hospital - transition to Phase 2
+                    print(f"  [HOSPITAL] {order_id}: Drone {mission['drone_id']} arrived at hospital. Picking up supplies...")
+                    mission["mission_phase"] = "TO_CUSTOMER"
+                    mission["dispatch_status"] = "TO_CUSTOMER"
+                    mission["current_coords"] = mission["hospital_coords"].copy()
+                    mission["eta_minutes"] = mission.get("customer_eta_minutes", 0)
+                    mission["initial_eta"] = mission.get("customer_eta_minutes", 0)
+
+                    # Update order service with new phase
+                    try:
+                        http_requests.post(
+                            f"{ORDER_URL}/dispatch/update",
+                            json={
+                                "order_id": order_id,
+                                "drone_id": mission["drone_id"],
+                                "dispatch_status": "TO_CUSTOMER",
+                                "mission_phase": "TO_CUSTOMER",
+                                "eta_minutes": mission["eta_minutes"],
+                            },
+                            timeout=10,
+                        )
+                    except Exception as e:
+                        print(f"  [HOSPITAL] Warning: could not update order service phase: {e}")
+
+                    # Update drone position to hospital
+                    try:
+                        http_requests.patch(
+                            f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                            json={
+                                "status": "TO_CUSTOMER",
+                                "lat": mission["hospital_coords"]["lat"],
+                                "lng": mission["hospital_coords"]["lng"],
+                                "current_lat": mission["hospital_coords"]["lat"],
+                                "current_lng": mission["hospital_coords"]["lng"],
+                                "target_lat": mission["customer_coords"]["lat"],
+                                "target_lng": mission["customer_coords"]["lng"],
+                            },
+                            timeout=10,
+                        )
+                    except Exception as e:
+                        print(f"  [HOSPITAL] Warning: could not update drone status: {e}")
+                    continue
+
+                # Countdown to hospital
+                old_eta = mission.get("eta_minutes", 0)
+                mission["eta_minutes"] = max(0, old_eta - (POLL_INTERVAL_SECONDS / 60))
+                print(f"  [TO_HOSPITAL] {order_id}: ETA to hospital {old_eta:.1f} → {mission['eta_minutes']:.1f} min")
+
+                # Update drone position (drone → hospital)
+                drone_start = mission.get("drone_start_coords", mission["current_coords"])
+                hospital = mission["hospital_coords"]
+                progress = 1 - (mission["eta_minutes"] / max(mission.get("hospital_eta_minutes", mission["eta_minutes"] + 1), 1))
+                new_lat = drone_start["lat"] + progress * (hospital["lat"] - drone_start["lat"])
+                new_lng = drone_start["lng"] + progress * (hospital["lng"] - drone_start["lng"])
+                mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
+
+                # Update position in drone management
+                try:
+                    http_requests.patch(
+                        f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/position",
+                        json={"lat": new_lat, "lng": new_lng},
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"  [TO_HOSPITAL] Warning: could not update drone position: {e}")
+
+                # Skip weather check during TO_HOSPITAL phase (no hazard concern)
+                continue
+
+            # Phase 2: Drone flying from hospital to customer (delivering supplies)
+            if mission_phase == "TO_CUSTOMER" or mission["dispatch_status"] == "TO_CUSTOMER":
+                # For backward compatibility with existing IN_FLIGHT status
+                mission["dispatch_status"] = "IN_FLIGHT"
 
             # Simulate drone movement and battery consumption
             current_eta = mission.get("eta_minutes", 0)
@@ -518,7 +643,18 @@ def poll_active_missions():
                 except Exception as e:
                     print(f"  [POLL] Warning: could not update drone position: {e}")
 
-            print(f"  [POLL] Checking weather for mission {order_id} (drone {mission['drone_id']}, ETA: {mission['eta_minutes']:.1f}min)")
+            print(f"  [POLL] Checking weather for mission {order_id} (phase: {mission.get('mission_phase', 'UNKNOWN')}, drone {mission['drone_id']}, ETA: {mission['eta_minutes']:.1f}min)")
+
+            # Determine destination based on mission phase
+            mission_phase = mission.get("mission_phase", mission["dispatch_status"])
+            if mission_phase == "TO_HOSPITAL":
+                destination_coords = mission["hospital_coords"]
+                destination_name = "hospital"
+            elif mission_phase == "TO_CUSTOMER" or mission_phase == "IN_FLIGHT" or mission_phase == "REROUTED_IN_FLIGHT":
+                destination_coords = mission["customer_coords"]
+                destination_name = "customer"
+            else:
+                continue  # Skip weather check for other phases
 
             try:
                 resp = http_requests.post(
@@ -527,7 +663,7 @@ def poll_active_missions():
                         "order_id": order_id,
                         "drone_id": mission["drone_id"],
                         "current_coords": mission["current_coords"],
-                        "destination_coords": mission["customer_coords"],
+                        "destination_coords": destination_coords,
                     },
                     timeout=15,
                 )
@@ -539,7 +675,7 @@ def poll_active_missions():
             if weather_data.get("status") != "UNSAFE":
                 continue
 
-            print(f"  [POLL] UNSAFE weather detected for {order_id}: {weather_data.get('reason')}")
+            print(f"  [POLL] UNSAFE weather detected for {order_id} (phase: {mission_phase}): {weather_data.get('reason')}")
             hazard_zone = weather_data.get("hazard_zone", {})
 
             # Scenario 3.1/3.2: Attempt reroute
@@ -550,10 +686,11 @@ def poll_active_missions():
                         "order_id": order_id,
                         "drone_id": mission["drone_id"],
                         "current_coords": mission["current_coords"],
-                        "destination_coords": mission["customer_coords"],
+                        "destination_coords": destination_coords,
                         "hazard_zone": hazard_zone,
                         "avoid_conditions": weather_data.get("reason", []),
                         "max_detour_minutes": 10,
+                        "mission_phase": mission_phase,  # Pass mission phase to route planning
                     },
                     timeout=15,
                 )
@@ -627,6 +764,7 @@ def poll_active_missions():
                             "order_id": order_id,
                             "drone_id": mission["drone_id"],
                             "dispatch_status": "REROUTED_IN_FLIGHT",
+                            "mission_phase": mission.get("mission_phase", "TO_CUSTOMER"),  # Preserve current phase
                             "route_id": reroute_data.get("route_id"),
                             "updated_eta": reroute_data.get("updated_eta"),
                             "reroute_summary": route_summary,
@@ -682,12 +820,26 @@ def handle_delivery_completion(order_id, mission):
     # Get depot location
     depot_coords = get_depot_location()
 
-    # Calculate battery consumed during flight
-    flight_distance = haversine(
-        mission["hospital_coords"]["lat"], mission["hospital_coords"]["lng"],
-        mission["customer_coords"]["lat"], mission["customer_coords"]["lng"]
+    # Calculate battery consumed during ENTIRE mission (both phases)
+    drone_start = mission.get("drone_start_coords", mission["hospital_coords"])
+    hospital = mission["hospital_coords"]
+    customer = mission["customer_coords"]
+
+    # Phase 1: Drone start → Hospital (pickup)
+    distance_to_hospital = haversine(
+        drone_start["lat"], drone_start["lng"],
+        hospital["lat"], hospital["lng"]
     )
-    battery_consumed = calculate_battery_consumption(flight_distance)
+
+    # Phase 2: Hospital → Customer (delivery)
+    distance_hospital_to_customer = haversine(
+        hospital["lat"], hospital["lng"],
+        customer["lat"], customer["lng"]
+    )
+
+    # Total mission distance
+    total_mission_distance = distance_to_hospital + distance_hospital_to_customer
+    battery_consumed = calculate_battery_consumption(total_mission_distance)
 
     # Calculate distance to depot and additional battery needed
     distance_to_depot = haversine(
@@ -917,6 +1069,7 @@ def _run_single_poll(order_id, mission):
                     "order_id": order_id,
                     "drone_id": mission["drone_id"],
                     "dispatch_status": "REROUTED_IN_FLIGHT",
+                    "mission_phase": mission.get("mission_phase", "TO_CUSTOMER"),  # Preserve current phase
                     "route_id": reroute_data.get("route_id"),
                     "updated_eta": reroute_data.get("updated_eta"),
                     "reroute_summary": route_summary,

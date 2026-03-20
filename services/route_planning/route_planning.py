@@ -241,6 +241,65 @@ def reroute():
     destination_coords = data.get("destination_coords", {})
     hazard_zone = data.get("hazard_zone", {})
     max_detour = data.get("max_detour_minutes", 10)
+    mission_phase = data.get("mission_phase", "TO_CUSTOMER")  # Default to TO_CUSTOMER for backward compatibility
+
+    # For TO_HOSPITAL phase, use simpler direct routing with hazard avoidance
+    # (no need for complex A* since no supplies on board yet)
+    if mission_phase == "TO_HOSPITAL":
+        print(f"  [REROUTE] {order_id}: Rerouting TO_HOSPITAL phase")
+        direct_distance = haversine(
+            current_coords.get("lat", 0), current_coords.get("lng", 0),
+            destination_coords.get("lat", 0), destination_coords.get("lng", 0)
+        )
+
+        # Simple detour: add 15-20% for going around hazard
+        detour_factor = 1.2
+        reroute_distance = round(direct_distance * detour_factor, 1)
+        eta_minutes = round((reroute_distance / DRONE_SPEED_KMH) * 60)
+
+        from datetime import datetime, timedelta, timezone
+        sg_tz = timezone(timedelta(hours=8))
+        updated_eta = (datetime.now(sg_tz) + timedelta(minutes=eta_minutes)).isoformat()
+
+        return jsonify({
+            "status": "REROUTE_FOUND",
+            "route_id": f"RT-HOSP-{abs(hash(order_id)) % 1000:03d}",
+            "order_id": order_id,
+            "drone_id": drone_id,
+            "waypoints": [
+                {"lat": round(current_coords.get("lat", 0), 4), "lng": round(current_coords.get("lng", 0), 4)},
+                {"lat": round(destination_coords.get("lat", 0), 4), "lng": round(destination_coords.get("lng", 0), 4)}
+            ],
+            "updated_eta": updated_eta,
+            "distance_km": reroute_distance,
+            "eta_minutes": eta_minutes,
+            "original_distance_km": round(direct_distance, 1),
+            "detour_distance_km": round(reroute_distance - direct_distance, 1),
+            "detour_percentage": round((detour_factor - 1) * 100, 1),
+            "waypoint_count": 2,
+            "additional_battery_consumption_pct": round((reroute_distance - direct_distance) * BASE_CONSUMPTION_PER_KM, 1),
+            "estimated_arrival_battery_pct": 80,  # Placeholder
+            "route_summary": {
+                "phase": "TO_HOSPITAL",
+                "original_path": {
+                    "start": {"lat": round(current_coords.get("lat", 0), 4), "lng": round(current_coords.get("lng", 0), 4)},
+                    "end": {"lat": round(destination_coords.get("lat", 0), 4), "lng": round(destination_coords.get("lng", 0), 4)},
+                    "distance_km": round(direct_distance, 1),
+                },
+                "new_path": {
+                    "waypoints": [
+                        {"lat": round(current_coords.get("lat", 0), 4), "lng": round(current_coords.get("lng", 0), 4)},
+                        {"lat": round(destination_coords.get("lat", 0), 4), "lng": round(destination_coords.get("lng", 0), 4)}
+                    ],
+                    "distance_km": reroute_distance,
+                },
+                "reason_for_detour": f"Hazard zone avoided en route to hospital. Mission phase: {mission_phase}",
+            },
+            "hazards_avoided": [hazard_zone],
+            "mission_phase": mission_phase,
+        })
+
+    # Original A* logic for TO_CUSTOMER phase
 
     result = astar_reroute(current_coords, destination_coords, hazard_zone, max_detour)
 
@@ -281,6 +340,7 @@ def reroute():
         "additional_battery_consumption_pct": metadata["additional_battery_consumption_pct"],
         "estimated_arrival_battery_pct": round(estimated_arrival_battery_pct, 1),
         "route_summary": {
+            "phase": "TO_CUSTOMER",
             "original_path": {
                 "start": {"lat": round(current_coords.get("lat", 0), 4), "lng": round(current_coords.get("lng", 0), 4)},
                 "end": {"lat": round(destination_coords.get("lat", 0), 4), "lng": round(destination_coords.get("lng", 0), 4)},
@@ -300,6 +360,7 @@ def reroute():
                 "type": hazard_type,
             }
         ],
+        "mission_phase": mission_phase,
     })
 
 
