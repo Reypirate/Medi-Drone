@@ -73,6 +73,9 @@ def publish_message(exchange, routing_key, message):
         )
 
 
+
+
+
 def find_nearest_hospital(customer_coords, item_id, quantity):
     """Find the nearest hospital to the customer that has sufficient stock."""
     # Get hospitals with sufficient stock from inventory service
@@ -124,8 +127,9 @@ def find_nearest_hospital(customer_coords, item_id, quantity):
 
 @app.route("/order", methods=["POST"])
 def create_order():
-    """Scenario 1: Doctor submits a delivery request. Hospital auto-selected by proximity."""
+    """Scenario 1: Doctor submits a delivery request with an optional explicit hospital_id. If not provided, falls back to nearest."""
     data = request.get_json()
+    hospital_id = data.get("hospital_id")
     item_id = data.get("item_id")
     quantity = data.get("quantity", 1)
     urgency_level = data.get("urgency_level", "NORMAL")
@@ -133,8 +137,8 @@ def create_order():
     customer_coords = data.get("customer_coords")
 
     request_id = get_request_id()
-    log_with_context(None, f"POST /order - Creating order: item_id={item_id}, quantity={quantity}, urgency={urgency_level}",
-                   request_id=request_id, item_id=item_id, quantity=quantity, urgency=urgency_level)
+    log_with_context(None, f"POST /order - Creating order: hospital_id={hospital_id or 'AUTO'}, item_id={item_id}, quantity={quantity}, urgency={urgency_level}",
+                   request_id=request_id, hospital_id=hospital_id, item_id=item_id, quantity=quantity, urgency=urgency_level)
 
     if not customer_coords or "lat" not in customer_coords or "lng" not in customer_coords:
         log_with_context(None, "Order failed: Missing customer coordinates", level="warn", request_id=request_id)
@@ -148,32 +152,59 @@ def create_order():
     order_id = f"ORD-{uuid.uuid4().hex[:6].upper()}"
     log_with_context(None, f"Generated order_id: {order_id}", request_id=request_id, order_id=order_id)
 
-    # Auto-select nearest hospital with stock
-    nearest, error = find_nearest_hospital(customer_coords, item_id, quantity)
-    if not nearest:
-        orders[order_id] = {
-            "order_id": order_id, "hospital_id": None, "item_id": item_id,
-            "quantity": quantity, "urgency_level": urgency_level,
-            "customer_address": customer_address, "status": f"FAILED_{error}",
-            "drone_id": None, "eta_minutes": None, "dispatch_status": None,
-        }
-        log_with_context(None, f"Order {order_id} failed: {error}", level="error", request_id=request_id, order_id=order_id, error=error)
-        publish_message("notifications", "notify.sms", {
-            "event_type": "ORDER_FAILED",
-            "order_id": order_id,
-            "message": f"Order {order_id} failed: {error}. No hospital nearby has sufficient stock.",
-        })
-        return jsonify({
-            "order_id": order_id,
-            "status": "FAILED",
-            "reason": error,
-        }), 409
+    distance_km = None
 
-    hospital_id = nearest["hospital_id"]
-    hospital_name = nearest["name"]
-    log_with_context(None, f"Auto-selected hospital: {hospital_id} ({hospital_name}) at {nearest['distance_km']:.1f}km",
-                   request_id=request_id, order_id=order_id, hospital_id=hospital_id, hospital_name=hospital_name,
-                   distance_km=round(nearest['distance_km'], 2))
+    if hospital_id:
+        # Validate the explicit hospital_id via Hospital Service
+        try:
+            hosp_resp = http_requests.get(f"{HOSPITAL_URL}/hospital/{hospital_id}/location", timeout=10)
+            if hosp_resp.status_code == 404:
+                log_with_context(None, f"Order {order_id} failed: Invalid hospital ID {hospital_id}", level="error", request_id=request_id, order_id=order_id)
+                return jsonify({"order_id": order_id, "status": "FAILED", "reason": "INVALID_HOSPITAL", "message": "The selected hospital could not be found."}), 404
+            hosp_resp.raise_for_status()
+            hosp_data = hosp_resp.json()
+        except Exception as e:
+            log_with_context(None, f"Hospital verification failed: {e}", level="error", request_id=request_id, order_id=order_id)
+            return jsonify({"order_id": order_id, "status": "ERROR", "message": f"Hospital verification unavailable: {e}"}), 503
+
+        if hosp_data.get("status") != "ACTIVE":
+            log_with_context(None, f"Order {order_id} failed: Hospital {hospital_id} is not ACTIVE", level="error", request_id=request_id, order_id=order_id)
+            return jsonify({"order_id": order_id, "status": "FAILED", "reason": "HOSPITAL_NOT_ACTIVE", "message": "The selected hospital is currently not operational."}), 409
+
+        hospital_name = hosp_data.get("location_name", hospital_id)
+        hosp_coords = hosp_data.get("hospital_coords")
+        if hosp_coords:
+            distance_km = haversine(customer_coords["lat"], customer_coords["lng"], hosp_coords["lat"], hosp_coords["lng"])
+        
+        log_with_context(None, f"Explicit hospital verified: {hospital_id} ({hospital_name})",
+                       request_id=request_id, order_id=order_id, hospital_id=hospital_id)
+    else:
+        # Fallback: Auto-select nearest hospital with stock
+        nearest, error = find_nearest_hospital(customer_coords, item_id, quantity)
+        if not nearest:
+            orders[order_id] = {
+                "order_id": order_id, "hospital_id": None, "item_id": item_id,
+                "quantity": quantity, "urgency_level": urgency_level,
+                "customer_address": customer_address, "status": f"FAILED_{error}",
+                "drone_id": None, "eta_minutes": None, "dispatch_status": None,
+            }
+            log_with_context(None, f"Order {order_id} failed: {error}", level="error", request_id=request_id, order_id=order_id, error=error)
+            publish_message("notifications", "notify.sms", {
+                "event_type": "ORDER_FAILED",
+                "order_id": order_id,
+                "message": f"Order {order_id} failed: {error}. No hospital nearby has sufficient stock.",
+            })
+            return jsonify({
+                "order_id": order_id,
+                "status": "FAILED",
+                "reason": error,
+            }), 409
+
+        hospital_id = nearest["hospital_id"]
+        hospital_name = nearest["name"]
+        distance_km = nearest["distance_km"]
+        log_with_context(None, f"Auto-selected nearest hospital: {hospital_id} ({hospital_name}) at {distance_km:.1f}km",
+                       request_id=request_id, order_id=order_id, hospital_id=hospital_id)
 
     orders[order_id] = {
         "order_id": order_id,
@@ -257,10 +288,10 @@ def create_order():
         "status": "CONFIRMED",
         "hospital_id": hospital_id,
         "hospital_name": hospital_name,
-        "distance_km": round(nearest["distance_km"], 2),
+        "distance_km": round(distance_km, 2) if distance_km else None,
         "item_id": item_id,
         "reserved_quantity": quantity,
-        "message": f"Order confirmed. Nearest hospital: {hospital_name}. Pending drone dispatch.",
+        "message": f"Order confirmed. Dispatched from: {hospital_name}. Pending drone dispatch.",
     }), 201
 
 

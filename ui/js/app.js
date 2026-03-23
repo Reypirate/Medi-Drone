@@ -83,6 +83,29 @@ async function loadInventory() {
     }
 }
 
+// ── Load hospitals ───────────────────────────────────────────────
+
+async function loadHospitals() {
+    const select = document.getElementById("hospital-select");
+    try {
+        const hospMap = await fetchHospitalNames();
+        const options = Object.entries(hospMap).map(([id, name]) => 
+            `<option value="${id}">${name} (${id})</option>`
+        );
+        select.innerHTML = '<option value="">Auto-select Nearest Hospital</option>' + options.join("");
+        addLog(`Loaded ${options.length} dispatch hospitals`, "info");
+    } catch (e) {
+        select.innerHTML = '<option value="">Failed to load hospitals</option>';
+        addLog("Failed to load dispatch hospitals", "warn");
+    }
+}
+
+// Ensure loads are called on init
+document.addEventListener("DOMContentLoaded", () => {
+    loadHospitals();
+    loadInventory();
+});
+
 // ── Address mode switching ────────────────────────────────────────
 
 function setAddressMode(mode) {
@@ -338,6 +361,7 @@ async function submitOrder() {
     }
 
     const payload = {
+        hospital_id: document.getElementById("hospital-select").value,
         item_id: document.getElementById("item-select").value,
         quantity: parseInt(document.getElementById("quantity").value),
         urgency_level: selectedUrgency,
