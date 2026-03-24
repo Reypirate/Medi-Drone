@@ -5,65 +5,192 @@ import uuid
 import threading
 import requests as http_requests
 import pika
+import mysql.connector
+import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import amqp_setup
 from common.request_tracking import (
-    get_request_id, set_request_id, extract_request_id_from_amqp,
+    get_request_id, set_request_id,
     log_with_context, init_flask_request_tracking
 )
 
 app = Flask(__name__)
 CORS(app)
 init_flask_request_tracking(app)
-print("  [ORDER] Request tracking initialized")
 
 INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://inventory:5003")
-HOSPITAL_URL = os.environ.get("HOSPITAL_URL", "http://hospital:5005")
+HOSPITAL_URL  = os.environ.get("HOSPITAL_URL",  "http://hospital:5005")
 
-orders = {}
-amqp_channel = None
+amqp_channel    = None
 amqp_connection = None
-
 EARTH_RADIUS_KM = 6371.0
 
+# ── Database helpers ──────────────────────────────────────────────────────────
 
-def haversine(lat1, lng1, lat2, lng2):
-    lat1, lng1, lat2, lng2 = map(math.radians, [lat1, lng1, lat2, lng2])
-    dlat, dlng = lat2 - lat1, lng2 - lng1
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+DB_CONFIG = {
+    "host":     os.environ.get("MYSQL_HOST", "mysql-order"),
+    "port":     int(os.environ.get("MYSQL_PORT", 3306)),
+    "user":     "root",
+    "password": os.environ.get("MYSQL_ROOT_PASSWORD", "root_password"),
+    "database": "order_db",
+}
 
+def get_db():
+    return mysql.connector.connect(**DB_CONFIG)
+
+def wait_for_db(max_retries=12, delay=5):
+    for attempt in range(max_retries):
+        try:
+            conn = get_db()
+            conn.close()
+            print("  [ORDER] Connected to MySQL order_db")
+            return
+        except mysql.connector.Error:
+            print(f"  [ORDER] Waiting for MySQL... attempt {attempt + 1}/{max_retries}")
+            time.sleep(delay)
+    raise Exception("Could not connect to MySQL after retries")
+
+def db_create_order(order_data: dict):
+    """Insert a new order row."""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        customer_coords = order_data.get("customer_coords") or {}
+        cursor.execute("""
+            INSERT INTO orders (
+                order_id, hospital_id, hospital_name, item_id, quantity,
+                urgency_level, customer_address, customer_lat, customer_lng, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            order_data["order_id"],
+            order_data.get("hospital_id"),
+            order_data.get("hospital_name"),
+            order_data.get("item_id"),
+            order_data.get("quantity", 1),
+            order_data.get("urgency_level", "NORMAL"),
+            order_data.get("customer_address", ""),
+            customer_coords.get("lat"),
+            customer_coords.get("lng"),
+            order_data.get("status", "PENDING"),
+        ))
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+def db_get_order(order_id: str) -> dict | None:
+    """Fetch a single order by ID. Returns None if not found."""
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        # Deserialise JSON column
+        if row.get("reroute_details") and isinstance(row["reroute_details"], str):
+            row["reroute_details"] = json.loads(row["reroute_details"])
+        # Rebuild customer_coords sub-object for callers that expect it
+        if row.get("customer_lat") and row.get("customer_lng"):
+            row["customer_coords"] = {"lat": row["customer_lat"], "lng": row["customer_lng"]}
+        return row
+    finally:
+        cursor.close()
+        conn.close()
+
+def db_update_order(order_id: str, fields: dict):
+    """Update arbitrary fields on an order row."""
+    if not fields:
+        return
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # Serialise any dict/list values to JSON
+        processed = {}
+        for k, v in fields.items():
+            if isinstance(v, (dict, list)):
+                processed[k] = json.dumps(v)
+            else:
+                processed[k] = v
+
+        set_clause = ", ".join(f"{k} = %s" for k in processed)
+        values = list(processed.values()) + [order_id]
+        cursor.execute(f"UPDATE orders SET {set_clause} WHERE order_id = %s", values)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+def db_delete_order(order_id: str) -> bool:
+    """Hard-delete an order. Returns True if a row was deleted."""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM orders WHERE order_id = %s", (order_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        cursor.close()
+        conn.close()
+
+def db_list_orders(status_filter: str | None = None) -> list[dict]:
+    """Return all orders, optionally filtered by status group."""
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if status_filter == "active":
+            cursor.execute("""
+                SELECT * FROM orders
+                WHERE status IN ('CONFIRMED','TO_HOSPITAL','TO_CUSTOMER','IN_TRANSIT','DISPATCHED')
+                ORDER BY created_at DESC
+            """)
+        elif status_filter == "cancelled":
+            cursor.execute("""
+                SELECT * FROM orders
+                WHERE status LIKE 'CANCELLED%'
+                ORDER BY created_at DESC
+            """)
+        elif status_filter == "completed":
+            cursor.execute("""
+                SELECT * FROM orders WHERE status = 'DELIVERED'
+                ORDER BY created_at DESC
+            """)
+        else:
+            cursor.execute("SELECT * FROM orders ORDER BY created_at DESC")
+
+        rows = cursor.fetchall()
+        for row in rows:
+            if row.get("reroute_details") and isinstance(row["reroute_details"], str):
+                row["reroute_details"] = json.loads(row["reroute_details"])
+            if row.get("customer_lat") and row.get("customer_lng"):
+                row["customer_coords"] = {"lat": row["customer_lat"], "lng": row["customer_lng"]}
+        return rows
+    finally:
+        cursor.close()
+        conn.close()
+
+# ── AMQP helpers ──────────────────────────────────────────────────────────────
 
 def init_amqp():
     global amqp_connection, amqp_channel
     amqp_connection, amqp_channel = amqp_setup.get_connection()
 
-
 def publish_message(exchange, routing_key, message):
     global amqp_channel, amqp_connection
     request_id = get_request_id()
-
     try:
         if amqp_channel is None or amqp_channel.is_closed:
             init_amqp()
-
-        # Include request ID in AMQP headers for tracing
-        headers = {}
-        if request_id:
-            headers['X-Request-ID'] = request_id
-
+        headers = {"X-Request-ID": request_id} if request_id else {}
         amqp_channel.basic_publish(
             exchange=exchange,
             routing_key=routing_key,
             body=json.dumps(message),
             properties=pika.BasicProperties(delivery_mode=2, headers=headers),
         )
-        log_with_context(None, f"AMQP Published to {exchange}/{routing_key}: {message.get('order_id', 'N/A')}",
-                       request_id=request_id, exchange=exchange, routing_key=routing_key)
     except Exception as e:
-        log_with_context(None, f"AMQP ERROR publishing to {exchange}/{routing_key}: {e}",
-                       level="error", request_id=request_id, error=str(e))
+        print(f"  [AMQP ERROR] {e}")
         init_amqp()
         amqp_channel.basic_publish(
             exchange=exchange,
@@ -72,51 +199,41 @@ def publish_message(exchange, routing_key, message):
             properties=pika.BasicProperties(delivery_mode=2),
         )
 
+# ── Hospital auto-selection ───────────────────────────────────────────────────
 
-
-
+def haversine(lat1, lng1, lat2, lng2):
+    lat1, lng1, lat2, lng2 = map(math.radians, [lat1, lng1, lat2, lng2])
+    dlat, dlng = lat2 - lat1, lng2 - lng1
+    a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlng/2)**2
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
 
 def find_nearest_hospital(customer_coords, item_id, quantity):
-    """Find the nearest hospital to the customer that has sufficient stock."""
-    # Get hospitals with sufficient stock from inventory service
     try:
-        search_resp = http_requests.get(
+        resp = http_requests.get(
             f"{INVENTORY_URL}/inventory/search",
             params={"item_id": item_id, "quantity": quantity},
             timeout=10,
         )
-        search_data = search_resp.json()
-        stocked_hospitals = {h["hospital_id"] for h in search_data.get("hospitals", [])}
+        stocked = {h["hospital_id"] for h in resp.json().get("hospitals", [])}
     except Exception as e:
-        print(f"  [ORDER] Inventory search failed: {e}")
         return None, f"Inventory service unavailable: {e}"
 
-    if not stocked_hospitals:
+    if not stocked:
         return None, "NO_HOSPITAL_WITH_STOCK"
 
-    # Get all hospital coordinates
     try:
-        hosp_resp = http_requests.get(f"{HOSPITAL_URL}/hospitals", timeout=10)
-        all_hospitals = hosp_resp.json()
+        all_hosps = http_requests.get(f"{HOSPITAL_URL}/hospitals", timeout=10).json()
     except Exception as e:
-        print(f"  [ORDER] Hospital service unavailable: {e}")
         return None, f"Hospital service unavailable: {e}"
 
-    # Filter to hospitals that have stock and compute distances
     candidates = []
-    for h in all_hospitals:
-        if h["hospital_id"] in stocked_hospitals:
+    for h in all_hosps:
+        if h["hospital_id"] in stocked:
             dist = haversine(
                 customer_coords["lat"], customer_coords["lng"],
                 h["lat"], h["lng"],
             )
-            candidates.append({
-                "hospital_id": h["hospital_id"],
-                "name": h["name"],
-                "lat": h["lat"],
-                "lng": h["lng"],
-                "distance_km": dist,
-            })
+            candidates.append({**h, "distance_km": dist})
 
     if not candidates:
         return None, "NO_ACTIVE_HOSPITAL_WITH_STOCK"
@@ -124,370 +241,293 @@ def find_nearest_hospital(customer_coords, item_id, quantity):
     candidates.sort(key=lambda c: c["distance_km"])
     return candidates[0], None
 
+# ── Flask routes ──────────────────────────────────────────────────────────────
 
 @app.route("/order", methods=["POST"])
 def create_order():
-    """Scenario 1: Doctor submits a delivery request with an optional explicit hospital_id. If not provided, falls back to nearest."""
     data = request.get_json()
-    hospital_id = data.get("hospital_id")
-    item_id = data.get("item_id")
-    quantity = data.get("quantity", 1)
-    urgency_level = data.get("urgency_level", "NORMAL")
-    customer_address = data.get("customer_address", "")
+    hospital_id     = data.get("hospital_id")
+    item_id         = data.get("item_id")
+    quantity        = data.get("quantity", 1)
+    urgency_level   = data.get("urgency_level", "NORMAL")
+    customer_address= data.get("customer_address", "")
     customer_coords = data.get("customer_coords")
 
-    request_id = get_request_id()
-    log_with_context(None, f"POST /order - Creating order: hospital_id={hospital_id or 'AUTO'}, item_id={item_id}, quantity={quantity}, urgency={urgency_level}",
-                   request_id=request_id, hospital_id=hospital_id, item_id=item_id, quantity=quantity, urgency=urgency_level)
-
-    if not customer_coords or "lat" not in customer_coords or "lng" not in customer_coords:
-        log_with_context(None, "Order failed: Missing customer coordinates", level="warn", request_id=request_id)
-        return jsonify({"status": "FAILED", "reason": "CUSTOMER_COORDS_REQUIRED",
-                        "message": "Validated customer coordinates are required."}), 400
-
+    if not customer_coords or "lat" not in customer_coords:
+        return jsonify({"status": "FAILED", "reason": "CUSTOMER_COORDS_REQUIRED"}), 400
     if not item_id:
-        log_with_context(None, "Order failed: Missing item_id", level="warn", request_id=request_id)
         return jsonify({"status": "FAILED", "reason": "ITEM_ID_REQUIRED"}), 400
 
-    order_id = f"ORD-{uuid.uuid4().hex[:6].upper()}"
-    log_with_context(None, f"Generated order_id: {order_id}", request_id=request_id, order_id=order_id)
-
-    distance_km = None
+    order_id     = f"ORD-{uuid.uuid4().hex[:6].upper()}"
+    distance_km  = None
+    hospital_name = None
 
     if hospital_id:
-        # Validate the explicit hospital_id via Hospital Service
         try:
-            hosp_resp = http_requests.get(f"{HOSPITAL_URL}/hospital/{hospital_id}/location", timeout=10)
-            if hosp_resp.status_code == 404:
-                log_with_context(None, f"Order {order_id} failed: Invalid hospital ID {hospital_id}", level="error", request_id=request_id, order_id=order_id)
-                return jsonify({"order_id": order_id, "status": "FAILED", "reason": "INVALID_HOSPITAL", "message": "The selected hospital could not be found."}), 404
-            hosp_resp.raise_for_status()
-            hosp_data = hosp_resp.json()
+            resp = http_requests.get(
+                f"{HOSPITAL_URL}/hospital/{hospital_id}/location", timeout=10)
+            if resp.status_code == 404:
+                return jsonify({"order_id": order_id, "status": "FAILED",
+                                "reason": "INVALID_HOSPITAL"}), 404
+            hosp_data = resp.json()
         except Exception as e:
-            log_with_context(None, f"Hospital verification failed: {e}", level="error", request_id=request_id, order_id=order_id)
-            return jsonify({"order_id": order_id, "status": "ERROR", "message": f"Hospital verification unavailable: {e}"}), 503
+            return jsonify({"order_id": order_id, "status": "ERROR",
+                            "message": str(e)}), 503
 
         if hosp_data.get("status") != "ACTIVE":
-            log_with_context(None, f"Order {order_id} failed: Hospital {hospital_id} is not ACTIVE", level="error", request_id=request_id, order_id=order_id)
-            return jsonify({"order_id": order_id, "status": "FAILED", "reason": "HOSPITAL_NOT_ACTIVE", "message": "The selected hospital is currently not operational."}), 409
+            return jsonify({"order_id": order_id, "status": "FAILED",
+                            "reason": "HOSPITAL_NOT_ACTIVE"}), 409
 
         hospital_name = hosp_data.get("location_name", hospital_id)
-        hosp_coords = hosp_data.get("hospital_coords")
-        if hosp_coords:
-            distance_km = haversine(customer_coords["lat"], customer_coords["lng"], hosp_coords["lat"], hosp_coords["lng"])
-        
-        log_with_context(None, f"Explicit hospital verified: {hospital_id} ({hospital_name})",
-                       request_id=request_id, order_id=order_id, hospital_id=hospital_id)
+        coords = hosp_data.get("hospital_coords", {})
+        if coords:
+            distance_km = haversine(
+                customer_coords["lat"], customer_coords["lng"],
+                coords["lat"], coords["lng"])
     else:
-        # Fallback: Auto-select nearest hospital with stock
         nearest, error = find_nearest_hospital(customer_coords, item_id, quantity)
         if not nearest:
-            orders[order_id] = {
+            db_create_order({
                 "order_id": order_id, "hospital_id": None, "item_id": item_id,
                 "quantity": quantity, "urgency_level": urgency_level,
-                "customer_address": customer_address, "status": f"FAILED_{error}",
-                "drone_id": None, "eta_minutes": None, "dispatch_status": None,
-            }
-            log_with_context(None, f"Order {order_id} failed: {error}", level="error", request_id=request_id, order_id=order_id, error=error)
-            publish_message("notifications", "notify.sms", {
-                "event_type": "ORDER_FAILED",
-                "order_id": order_id,
-                "message": f"Order {order_id} failed: {error}. No hospital nearby has sufficient stock.",
+                "customer_address": customer_address,
+                "customer_coords": customer_coords,
+                "status": f"FAILED_{error}",
             })
-            return jsonify({
-                "order_id": order_id,
-                "status": "FAILED",
-                "reason": error,
-            }), 409
+            publish_message("notifications", "notify.sms", {
+                "event_type": "ORDER_FAILED", "order_id": order_id,
+                "message": f"Order {order_id} failed: {error}.",
+            })
+            return jsonify({"order_id": order_id, "status": "FAILED", "reason": error}), 409
 
-        hospital_id = nearest["hospital_id"]
+        hospital_id   = nearest["hospital_id"]
         hospital_name = nearest["name"]
-        distance_km = nearest["distance_km"]
-        log_with_context(None, f"Auto-selected nearest hospital: {hospital_id} ({hospital_name}) at {distance_km:.1f}km",
-                       request_id=request_id, order_id=order_id, hospital_id=hospital_id)
+        distance_km   = nearest["distance_km"]
 
-    orders[order_id] = {
-        "order_id": order_id,
-        "hospital_id": hospital_id,
-        "hospital_name": hospital_name,
-        "item_id": item_id,
-        "quantity": quantity,
-        "urgency_level": urgency_level,
+    # Write to DB as PENDING before attempting inventory reservation
+    db_create_order({
+        "order_id": order_id, "hospital_id": hospital_id,
+        "hospital_name": hospital_name, "item_id": item_id,
+        "quantity": quantity, "urgency_level": urgency_level,
         "customer_address": customer_address,
+        "customer_coords": customer_coords,
         "status": "PENDING",
-        "drone_id": None,
-        "eta_minutes": None,
-        "dispatch_status": None,
-    }
+    })
 
-    # Reserve inventory from the selected hospital
-    log_with_context(None, f"Reserving inventory: {item_id} x{quantity} from {hospital_id}",
-                   request_id=request_id, order_id=order_id, item_id=item_id, quantity=quantity)
+    # Reserve inventory
     try:
         reserve_resp = http_requests.post(
             f"{INVENTORY_URL}/inventory/reserve",
-            json={"order_id": order_id, "hospital_id": hospital_id, "item_id": item_id, "quantity": quantity},
-            headers={"X-Request-ID": request_id or ""},
+            json={"order_id": order_id, "hospital_id": hospital_id,
+                  "item_id": item_id, "quantity": quantity},
             timeout=10,
         )
         reserve_data = reserve_resp.json()
     except Exception as e:
-        orders[order_id]["status"] = "ERROR"
-        log_with_context(None, f"Inventory service error: {e}", level="error", request_id=request_id, order_id=order_id)
-        return jsonify({"order_id": order_id, "status": "ERROR", "message": f"Inventory service unavailable: {e}"}), 503
+        db_update_order(order_id, {"status": "ERROR"})
+        return jsonify({"order_id": order_id, "status": "ERROR",
+                        "message": str(e)}), 503
 
     if reserve_data.get("status") != "RESERVED":
-        orders[order_id]["status"] = "FAILED_STOCK"
-        log_with_context(None, f"Inventory reservation failed: {reserve_data.get('reason', 'UNKNOWN')}",
-                       level="warn", request_id=request_id, order_id=order_id, reason=reserve_data.get("reason"))
-
+        db_update_order(order_id, {"status": "FAILED_STOCK"})
         publish_message("orders", "order.failed", {
-            "order_id": order_id,
-            "hospital_id": hospital_id,
-            "item_id": item_id,
-            "reason": reserve_data.get("reason", "UNKNOWN"),
+            "order_id": order_id, "hospital_id": hospital_id,
+            "item_id": item_id, "reason": reserve_data.get("reason"),
         })
         publish_message("notifications", "notify.sms", {
-            "event_type": "ORDER_FAILED",
-            "order_id": order_id,
+            "event_type": "ORDER_FAILED", "order_id": order_id,
             "hospital_id": hospital_id,
-            "message": f"Order {order_id} failed: {reserve_data.get('reason', 'Insufficient stock')}.",
+            "message": f"Order failed: {reserve_data.get('reason', 'Insufficient stock')}.",
         })
+        return jsonify({"order_id": order_id, "status": "FAILED",
+                        "reason": reserve_data.get("reason", "INSUFFICIENT_STOCK")}), 409
 
-        return jsonify({
-            "order_id": order_id,
-            "status": "FAILED",
-            "reason": reserve_data.get("reason", "INSUFFICIENT_STOCK"),
-        }), 409
-
-    orders[order_id]["status"] = "CONFIRMED"
-    log_with_context(None, f"Order {order_id} CONFIRMED - Publishing order.confirmed event",
-                   request_id=request_id, order_id=order_id, status="CONFIRMED")
+    db_update_order(order_id, {"status": "CONFIRMED"})
 
     publish_message("orders", "order.confirmed", {
-        "order_id": order_id,
-        "hospital_id": hospital_id,
-        "item_id": item_id,
-        "quantity": quantity,
+        "order_id": order_id, "hospital_id": hospital_id,
+        "item_id": item_id, "quantity": quantity,
         "urgency_level": urgency_level,
         "customer_address": customer_address,
         "customer_coords": customer_coords,
-        "message": f"Order confirmed from {hospital_name}. Awaiting drone assignment.",
+        "message": f"Order confirmed from {hospital_name}.",
     })
-
     publish_message("notifications", "notify.sms", {
-        "order_id": order_id,
-        "hospital_id": hospital_id,
-        "item_id": item_id,
+        "order_id": order_id, "hospital_id": hospital_id,
         "event_type": "ORDER_CONFIRMED",
-        "message": f"Your order {order_id} has been confirmed from {hospital_name}. Waiting for drone dispatch.",
+        "message": f"Order {order_id} confirmed from {hospital_name}. Awaiting drone dispatch.",
     })
 
     return jsonify({
-        "order_id": order_id,
-        "status": "CONFIRMED",
-        "hospital_id": hospital_id,
-        "hospital_name": hospital_name,
+        "order_id": order_id, "status": "CONFIRMED",
+        "hospital_id": hospital_id, "hospital_name": hospital_name,
         "distance_km": round(distance_km, 2) if distance_km else None,
-        "item_id": item_id,
-        "reserved_quantity": quantity,
-        "message": f"Order confirmed. Dispatched from: {hospital_name}. Pending drone dispatch.",
+        "item_id": item_id, "reserved_quantity": quantity,
+        "message": f"Order confirmed. Dispatching from: {hospital_name}.",
     }), 201
 
 
 @app.route("/order/<order_id>/cancel", methods=["POST"])
 def cancel_order(order_id):
-    """Called by Drone Dispatch when dispatch cannot proceed."""
-    data = request.get_json() or {}
+    data   = request.get_json() or {}
     reason = data.get("reason", "CANCELLED")
-    cancel_message = data.get("message", f"Order cancelled: {reason}")
+    msg    = data.get("message", f"Order cancelled: {reason}")
 
-    order = orders.get(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
 
-    inventory_released = False
+    released = False
     try:
         http_requests.post(
             f"{INVENTORY_URL}/inventory/release",
-            json={
-                "order_id": order_id,
-                "hospital_id": order["hospital_id"],
-                "item_id": order["item_id"],
-                "quantity": order["quantity"],
-            },
+            json={"order_id": order_id, "hospital_id": order["hospital_id"],
+                  "item_id": order["item_id"], "quantity": order["quantity"]},
             timeout=10,
         )
-        inventory_released = True
+        released = True
     except Exception as e:
-        print(f"  [WARNING] Inventory release failed for order {order_id}: {e}")
+        print(f"  [WARNING] Inventory release failed: {e}")
 
-    order["status"] = f"CANCELLED_{reason}"
-    order["cancel_message"] = cancel_message
+    db_update_order(order_id, {
+        "status": f"CANCELLED_{reason}",
+        "cancel_message": msg,
+    })
 
-    stock_note = "Reserved stock has been released." if inventory_released else "Warning: stock release failed — please check inventory manually."
+    stock_note = "Reserved stock released." if released else "Warning: stock release failed."
     publish_message("notifications", "notify.sms", {
-        "event_type": "ORDER_CANCELLED",
-        "order_id": order_id,
+        "event_type": "ORDER_CANCELLED", "order_id": order_id,
         "hospital_id": order["hospital_id"],
-        "message": f"Order {order_id}: {cancel_message} {stock_note}",
+        "message": f"Order {order_id}: {msg} {stock_note}",
     })
 
-    return jsonify({"order_id": order_id, "status": order["status"], "message": cancel_message})
-
-
-@app.route("/dispatch/update", methods=["POST"])
-def dispatch_update():
-    """Receives reroute/status updates from Drone Dispatch (Scenario 3.1)."""
-    data = request.get_json()
-    order_id = data.get("order_id")
-
-    order = orders.get(order_id)
-    if not order:
-        return jsonify({"error": "Order not found", "order_id": order_id}), 404
-
-    order["drone_id"] = data.get("drone_id", order.get("drone_id"))
-    order["dispatch_status"] = data.get("dispatch_status", order.get("dispatch_status"))
-    order["eta_minutes"] = data.get("eta_minutes", order.get("eta_minutes"))
-
-    # Always update mission_phase if provided
-    if "mission_phase" in data:
-        order["mission_phase"] = data["mission_phase"]
-
-    if data.get("dispatch_status") == "REROUTED_IN_FLIGHT":
-        # Preserve the mission phase (TO_HOSPITAL or TO_CUSTOMER) when rerouting
-        mission_phase = data.get("mission_phase", order.get("mission_phase", order.get("status", "TO_CUSTOMER")))
-        order["status"] = mission_phase  # Keep phase badge (To Hospital or To Customer)
-        order["route_id"] = data.get("route_id")
-        order["updated_eta"] = data.get("updated_eta")
-
-    return jsonify({
-        "message": "Dispatch update recorded successfully",
-        "order_id": order_id,
-        "order_status": order["status"],
-        "dispatch_status": order["dispatch_status"],
-    })
+    return jsonify({"order_id": order_id,
+                    "status": f"CANCELLED_{reason}", "message": msg})
 
 
 @app.route("/dispatch/confirm", methods=["POST"])
 def dispatch_confirm():
-    """Receives drone assignment confirmation from Drone Dispatch (Scenario 2, Step 7)."""
-    data = request.get_json()
+    data     = request.get_json()
     order_id = data.get("order_id")
-
-    order = orders.get(order_id)
+    order    = db_get_order(order_id)
     if not order:
-        return jsonify({"error": "Order not found", "order_id": order_id}), 404
+        return jsonify({"error": "Order not found"}), 404
 
-    drone_id = data.get("drone_id")
-    eta_minutes = data.get("eta_minutes")
-    dispatch_status = data.get("status", "TO_HOSPITAL")  # Drone dispatch sends TO_HOSPITAL status
-    mission_phase = data.get("mission_phase", dispatch_status)  # Get mission phase if provided
+    dispatch_status = data.get("status", "TO_HOSPITAL")
+    db_update_order(order_id, {
+        "status":          dispatch_status,
+        "mission_phase":   data.get("mission_phase", dispatch_status),
+        "drone_id":        data.get("drone_id"),
+        "eta_minutes":     data.get("eta_minutes"),
+        "dispatch_status": dispatch_status,
+    })
 
-    order["status"] = dispatch_status  # Main status reflects mission phase
-    order["mission_phase"] = mission_phase  # Store mission phase separately
-    order["drone_id"] = drone_id
-    order["eta_minutes"] = eta_minutes
-    order["dispatch_status"] = dispatch_status
+    return jsonify({"order_id": order_id, "status": dispatch_status,
+                    "drone_id": data.get("drone_id"),
+                    "eta_minutes": data.get("eta_minutes")})
 
+
+@app.route("/dispatch/update", methods=["POST"])
+def dispatch_update():
+    data     = request.get_json()
+    order_id = data.get("order_id")
+    order    = db_get_order(order_id)
+    if not order:
+        return jsonify({"error": "Order not found"}), 404
+
+    updates = {}
+    if "drone_id"        in data: updates["drone_id"]        = data["drone_id"]
+    if "dispatch_status" in data: updates["dispatch_status"] = data["dispatch_status"]
+    if "eta_minutes"     in data: updates["eta_minutes"]     = data["eta_minutes"]
+    if "mission_phase"   in data: updates["mission_phase"]   = data["mission_phase"]
+    if "route_id"        in data: updates["route_id"]        = data["route_id"]
+    if "updated_eta"     in data: updates["updated_eta"]     = data["updated_eta"]
+
+    if data.get("dispatch_status") == "REROUTED_IN_FLIGHT":
+        updates["status"] = data.get("mission_phase", order.get("status", "TO_CUSTOMER"))
+
+    if updates:
+        db_update_order(order_id, updates)
+
+    refreshed = db_get_order(order_id)
     return jsonify({
+        "message": "Dispatch update recorded",
         "order_id": order_id,
-        "status": dispatch_status,
-        "drone_id": drone_id,
-        "eta_minutes": eta_minutes,
+        "order_status":    refreshed["status"],
+        "dispatch_status": refreshed["dispatch_status"],
     })
 
 
 @app.route("/dispatch/failure", methods=["POST"])
 def dispatch_failure():
-    """Receives dispatch failure from Drone Dispatch (Scenario 3.2)."""
-    data = request.get_json()
-    order_id = data.get("order_id")
+    data         = request.get_json()
+    order_id     = data.get("order_id")
     failure_code = data.get("failure_code", "UNKNOWN")
-
-    order = orders.get(order_id)
+    order        = db_get_order(order_id)
     if not order:
-        return jsonify({"error": "Order not found", "order_id": order_id}), 404
+        return jsonify({"error": "Order not found"}), 404
 
-    order["status"] = f"CANCELLED_{failure_code}"
-    order["dispatch_status"] = data.get("dispatch_status", "ABORTED")
+    db_update_order(order_id, {
+        "status":          f"CANCELLED_{failure_code}",
+        "dispatch_status": data.get("dispatch_status", "ABORTED"),
+    })
 
-    inventory_released = False
+    released = False
     try:
         http_requests.post(
             f"{INVENTORY_URL}/inventory/release",
-            json={
-                "order_id": order_id,
-                "hospital_id": order["hospital_id"],
-                "item_id": order["item_id"],
-                "quantity": order["quantity"],
-            },
+            json={"order_id": order_id, "hospital_id": order["hospital_id"],
+                  "item_id": order["item_id"], "quantity": order["quantity"]},
             timeout=10,
         )
-        inventory_released = True
+        released = True
     except Exception as e:
-        print(f"  [WARNING] Inventory release failed for order {order_id}: {e}")
+        print(f"  [WARNING] Inventory release failed: {e}")
 
-    stock_note = "Reserved stock has been released." if inventory_released else "Warning: stock release failed — please check inventory manually."
+    stock_note = "Reserved stock released." if released else "Warning: stock release failed."
     publish_message("notifications", "notify.sms", {
         "event_type": f"ORDER_CANCELLED_{failure_code}",
-        "order_id": order_id,
-        "hospital_id": order["hospital_id"],
-        "message": f"URGENT: Delivery cancelled mid-flight due to {failure_code.replace('_', ' ').lower()}. "
-                   f"Drone returning to base. {stock_note}",
+        "order_id": order_id, "hospital_id": order["hospital_id"],
+        "message": f"URGENT: Delivery cancelled due to {failure_code.replace('_',' ').lower()}. {stock_note}",
     })
 
-    return jsonify({
-        "order_id": order_id,
-        "drone_id": data.get("drone_id"),
-        "status": order["status"],
-        "reason": f"{failure_code}",
-    })
+    return jsonify({"order_id": order_id, "drone_id": data.get("drone_id"),
+                    "status": f"CANCELLED_{failure_code}",
+                    "reason": failure_code})
 
 
 @app.route("/dispatch/complete", methods=["POST"])
 def dispatch_complete():
-    """Receives delivery completion from Drone Dispatch - marks order as DELIVERED."""
-    data = request.get_json()
+    data     = request.get_json()
     order_id = data.get("order_id")
-    drone_id = data.get("drone_id")
-
-    order = orders.get(order_id)
+    order    = db_get_order(order_id)
     if not order:
-        return jsonify({"error": "Order not found", "order_id": order_id}), 404
+        return jsonify({"error": "Order not found"}), 404
 
-    order["status"] = "DELIVERED"
-    order["dispatch_status"] = "DELIVERED"
-    order["drone_id"] = drone_id or order.get("drone_id")
+    drone_id = data.get("drone_id") or order.get("drone_id")
+    db_update_order(order_id, {
+        "status":          "DELIVERED",
+        "dispatch_status": "DELIVERED",
+        "drone_id":        drone_id,
+    })
 
-    # Publish delivery notification via both exchanges
     publish_message("orders", "order.delivered", {
-        "order_id": order_id,
-        "drone_id": order["drone_id"],
-        "hospital_id": order.get("hospital_id"),
-        "item_id": order.get("item_id"),
-        "message": f"Order {order_id} successfully delivered by drone {order['drone_id']}.",
+        "order_id": order_id, "drone_id": drone_id,
+        "hospital_id": order["hospital_id"], "item_id": order["item_id"],
+        "message": f"Order {order_id} delivered by drone {drone_id}.",
     })
-
     publish_message("notifications", "notify.sms", {
-        "order_id": order_id,
-        "drone_id": order["drone_id"],
-        "hospital_id": order.get("hospital_id"),
-        "item_id": order.get("item_id"),
-        "event_type": "ORDER_DELIVERED",
-        "message": f"Your order {order_id} has been successfully delivered by drone {order['drone_id']}!",
+        "order_id": order_id, "drone_id": drone_id,
+        "hospital_id": order["hospital_id"], "event_type": "ORDER_DELIVERED",
+        "message": f"Your order {order_id} has been delivered by drone {drone_id}!",
     })
 
-    return jsonify({
-        "order_id": order_id,
-        "status": "DELIVERED",
-        "drone_id": order["drone_id"],
-    })
+    return jsonify({"order_id": order_id, "status": "DELIVERED", "drone_id": drone_id})
 
 
 @app.route("/order/<order_id>", methods=["GET"])
 def get_order(order_id):
-    order = orders.get(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
     return jsonify(order)
@@ -495,53 +535,46 @@ def get_order(order_id):
 
 @app.route("/orders", methods=["GET"])
 def list_orders():
-    status_filter = request.args.get("status")  # active, cancelled, completed
-
-    filtered_orders = list(orders.values())
-
-    if status_filter:
-        if status_filter == "active":
-            filtered_orders = [o for o in filtered_orders if o.get("status") in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED")]
-        elif status_filter == "cancelled":
-            filtered_orders = [o for o in filtered_orders if o.get("status", "").startswith("CANCELLED")]
-        elif status_filter == "completed":
-            filtered_orders = [o for o in filtered_orders if o.get("status") == "DELIVERED"]
-
-    return jsonify({"orders": filtered_orders})
+    status_filter = request.args.get("status")
+    orders = db_list_orders(status_filter)
+    return jsonify({"orders": orders})
 
 
 @app.route("/order/<order_id>", methods=["DELETE"])
 def delete_order(order_id):
-    """Delete an order (only allowed for cancelled or completed orders)."""
-    order = orders.get(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
 
-    current_status = order.get("status")
-
-    # Cannot delete active orders
-    if current_status in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED", "CONFIRMED", "PENDING"):
+    active_statuses = {"TO_HOSPITAL","TO_CUSTOMER","IN_TRANSIT","DISPATCHED","CONFIRMED","PENDING"}
+    if order["status"] in active_statuses:
         return jsonify({
             "error": "Cannot delete active order",
-            "order_id": order_id,
-            "status": current_status,
-            "message": "Only cancelled or completed orders can be deleted"
+            "order_id": order_id, "status": order["status"],
         }), 400
 
-    del orders[order_id]
-    return jsonify({
-        "order_id": order_id,
-        "status": "DELETED",
-        "message": f"Order {order_id} has been deleted"
-    })
+    db_delete_order(order_id)
+    return jsonify({"order_id": order_id, "status": "DELETED",
+                    "message": f"Order {order_id} deleted"})
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "healthy", "service": "order", "orders_count": len(orders)})
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orders")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "healthy", "service": "order",
+                        "database": "connected", "orders_count": count})
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 503
 
 
 if __name__ == "__main__":
+    wait_for_db()
     init_amqp()
     print("  Order Service running on port 5001")
-    app.run(host="0.0.0.0", port=5001, debug=True)
+    app.run(host="0.0.0.0", port=5001, debug=False)

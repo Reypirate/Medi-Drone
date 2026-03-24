@@ -54,6 +54,23 @@ services:
     networks:
       - medidrone-net
 
+  mysql-order:
+    image: mysql:8.0
+    container_name: mysql-order
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes:
+      - ./services/order/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3309:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - medidrone-net
+
   # ──────────────────────────────────────────────────────────────────
   # Message Broker
   # ──────────────────────────────────────────────────────────────────
@@ -207,6 +224,9 @@ services:
       HOSPITAL_URL: http://hospital:5005
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
+      MYSQL_HOST: mysql-order
+      MYSQL_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -214,8 +234,12 @@ services:
         condition: service_started
       hospital:
         condition: service_started
+      mysql-order:
+        condition: service_healthy
     networks:
       - medidrone-net
+
+
 
   drone-dispatch:
     build: ./services/drone_dispatch
