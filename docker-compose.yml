@@ -37,22 +37,7 @@ services:
     networks:
       - medidrone-net
 
-  mysql-hospital:
-    image: mysql:8.0
-    container_name: mysql-hospital
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
-    volumes:
-      - ./services/hospital_mock/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "3308:3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - medidrone-net
+
 
   mysql-order:
     image: mysql:8.0
@@ -114,26 +99,6 @@ services:
     networks:
       - medidrone-net
 
-  hospital:
-    build: ./services/hospital_mock
-    container_name: hospital
-    ports:
-      - "5005:5005"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 20s
-    environment:
-      MYSQL_HOST: mysql-hospital
-      MYSQL_PORT: 3306
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
-    depends_on:
-      mysql-hospital:
-        condition: service_healthy
-    networks:
-      - medidrone-net
 
   drone-management:
     build: ./services/drone_management
@@ -221,7 +186,7 @@ services:
       start_period: 30s
     environment:
       INVENTORY_URL: http://inventory:5003
-      HOSPITAL_URL: http://hospital:5005
+      HOSPITAL_URL: https://personal-oyxjh2hr.outsystemscloud.com/HospitalService/rest/HospitalAPI
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       MYSQL_HOST: mysql-order
@@ -231,8 +196,6 @@ services:
       rabbitmq:
         condition: service_healthy
       inventory:
-        condition: service_started
-      hospital:
         condition: service_started
       mysql-order:
         condition: service_healthy
@@ -254,7 +217,7 @@ services:
       start_period: 30s
     environment:
       ORDER_URL: http://order:5001
-      HOSPITAL_URL: http://hospital:5005
+      HOSPITAL_URL: https://personal-oyxjh2hr.outsystemscloud.com/HospitalService/rest/HospitalAPI
       GEOLOCATION_URL: http://geolocation:5007
       DRONE_MGMT_URL: http://drone-management:5008
       WEATHER_URL: http://weather:5006
@@ -267,8 +230,6 @@ services:
       rabbitmq:
         condition: service_healthy
       order:
-        condition: service_started
-      hospital:
         condition: service_started
       geolocation:
         condition: service_started
@@ -313,8 +274,6 @@ services:
       start_period: 30s
     depends_on:
       inventory:
-        condition: service_healthy
-      hospital:
         condition: service_healthy
       drone-management:
         condition: service_healthy

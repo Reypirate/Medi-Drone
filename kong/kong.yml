@@ -46,7 +46,7 @@ services:
           - OPTIONS
 
   - name: hospital-service
-    url: http://hospital:5005
+    url: https://personal-oyxjh2hr.outsystemscloud.com/HospitalService/rest/HospitalAPI
     routes:
       - name: hospital-routes
         paths:
