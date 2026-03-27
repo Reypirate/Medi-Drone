@@ -518,7 +518,7 @@ def poll_active_missions():
 
             # Phase 1: Drone flying to hospital to pick up supplies
             if mission_phase == "TO_HOSPITAL" or mission["dispatch_status"] == "TO_HOSPITAL":
-                hospital_eta = mission.get("hospital_eta_minutes", 0)
+                hospital_eta = mission.get("eta_minutes", 0)
                 if hospital_eta <= 0:
                     # Reached hospital - transition to Phase 2
                     print(f"  [HOSPITAL] {order_id}: Drone {mission['drone_id']} arrived at hospital. Picking up supplies...")
@@ -586,6 +586,22 @@ def poll_active_missions():
                 except Exception as e:
                     print(f"  [TO_HOSPITAL] Warning: could not update drone position: {e}")
 
+                # Update order service with current ETA during TO_HOSPITAL phase
+                try:
+                    http_requests.post(
+                        f"{ORDER_URL}/dispatch/update",
+                        json={
+                            "order_id": order_id,
+                            "drone_id": mission["drone_id"],
+                            "dispatch_status": mission["dispatch_status"],
+                            "mission_phase": "TO_HOSPITAL",
+                            "eta_minutes": mission["eta_minutes"],
+                        },
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"  [TO_HOSPITAL] Warning: could not update order service ETA: {e}")
+
                 # Skip weather check during TO_HOSPITAL phase (no hazard concern)
                 continue
 
@@ -615,6 +631,7 @@ def poll_active_missions():
                         "order_id": order_id,
                         "drone_id": mission["drone_id"],
                         "dispatch_status": mission["dispatch_status"],
+                        "mission_phase": mission.get("mission_phase", mission["dispatch_status"]),
                         "eta_minutes": mission["eta_minutes"],
                     },
                     timeout=10,

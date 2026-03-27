@@ -443,8 +443,8 @@ def dispatch_update():
     if "route_id"        in data: updates["route_id"]        = data["route_id"]
     if "updated_eta"     in data: updates["updated_eta"]     = data["updated_eta"]
 
-    if data.get("dispatch_status") == "REROUTED_IN_FLIGHT":
-        updates["status"] = data.get("mission_phase", order.get("status", "TO_CUSTOMER"))
+    if "dispatch_status" in data:
+        updates["status"] = data.get("mission_phase", data["dispatch_status"])
 
     if updates:
         db_update_order(order_id, updates)
