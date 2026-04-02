@@ -677,7 +677,7 @@ let hospitalNameCache = null;
 let selectedMissionId = null;
 
 function navigateTo(page) {
-    const pages = ["dashboard", "inventory", "drones", "simulation"];
+    const pages = ["dashboard", "inventory", "drones", "simulation", "livemap"];
     pages.forEach(p => {
         document.getElementById(`page-${p}`).classList.toggle("page-hidden", p !== page);
         document.getElementById(`nav-${p}`).classList.toggle("active", p === page);
@@ -688,6 +688,11 @@ function navigateTo(page) {
     if (page === "simulation") {
         refreshSimulationStatus();
         refreshActiveMissions();
+    }
+    if (page === "livemap") {
+        initLiveMap();
+    } else {
+        stopMapPolling();
     }
 }
 
@@ -1505,4 +1510,601 @@ function renderHazardZones(zones) {
 
 function removeHazardZoneByIndex(index) {
     addSimLog(`&#9888; Remove hazard zone functionality not yet implemented for index ${index}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LIVE MAP - Google Maps drone tracking
+// ═══════════════════════════════════════════════════════════════════
+
+let liveMap = null;
+let mapDroneMarkers = {};
+let mapFlightPaths = [];
+let mapHazardCircles = [];
+let mapWeatherCircles = [];
+let mapInfoWindow = null;
+let mapPollTimer = null;
+let mapWeatherCache = {};
+let mapLastWeatherCheck = 0;
+const MAP_POLL_MS = 3000;
+const WEATHER_CHECK_INTERVAL_MS = 15000;
+
+const DARK_MAP_STYLE = [
+    { elementType: "geometry", stylers: [{ color: "#1d2c4d" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#8ec3b9" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#1a3646" }] },
+    { featureType: "administrative.country", elementType: "geometry.stroke", stylers: [{ color: "#4b6878" }] },
+    { featureType: "landscape.man_made", elementType: "geometry.stroke", stylers: [{ color: "#334e87" }] },
+    { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#023e58" }] },
+    { featureType: "poi", elementType: "geometry", stylers: [{ color: "#283d6a" }] },
+    { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#6f9ba5" }] },
+    { featureType: "poi.park", elementType: "geometry.fill", stylers: [{ color: "#023e58" }] },
+    { featureType: "road", elementType: "geometry", stylers: [{ color: "#304a7d" }] },
+    { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#98a5be" }] },
+    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#2c6675" }] },
+    { featureType: "road.highway", elementType: "geometry.stroke", stylers: [{ color: "#255763" }] },
+    { featureType: "transit", elementType: "labels.text.fill", stylers: [{ color: "#98a5be" }] },
+    { featureType: "water", elementType: "geometry.fill", stylers: [{ color: "#0e1626" }] },
+    { featureType: "water", elementType: "labels.text.fill", stylers: [{ color: "#4e6d70" }] },
+];
+
+const DRONE_DEPOT = { lat: 1.3644, lng: 103.8190 };
+
+let _mapInitRetries = 0;
+let _mapInitTimeout = null;
+
+function initLiveMap() {
+    if (!window._googleMapsReady) {
+        _mapInitRetries++;
+        if (_mapInitRetries > 30) {
+            document.getElementById("live-map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#f87171;font-size:14px;">Failed to load Google Maps. Check your API key and network connection.</div>';
+            return;
+        }
+        _mapInitTimeout = setTimeout(initLiveMap, 300);
+        return;
+    }
+    _mapInitRetries = 0;
+
+    if (!liveMap) {
+        liveMap = new google.maps.Map(document.getElementById("live-map"), {
+            center: { lat: 1.3521, lng: 103.8198 },
+            zoom: 12,
+            styles: DARK_MAP_STYLE,
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: false,
+            zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
+        });
+        mapInfoWindow = new google.maps.InfoWindow();
+    }
+
+    updateLiveMap();
+    startMapPolling();
+}
+
+function startMapPolling() {
+    stopMapPolling();
+    mapPollTimer = setInterval(updateLiveMap, MAP_POLL_MS);
+}
+
+function stopMapPolling() {
+    if (mapPollTimer) {
+        clearInterval(mapPollTimer);
+        mapPollTimer = null;
+    }
+    if (_mapInitTimeout) {
+        clearTimeout(_mapInitTimeout);
+        _mapInitTimeout = null;
+        _mapInitRetries = 0;
+    }
+}
+
+async function updateLiveMap() {
+    if (!liveMap) return;
+
+    try {
+        const [missionsData, dronesResp, weatherStatus] = await Promise.all([
+            fetch(`${DISPATCH_URL}/dispatch/missions`).then(r => r.json()).catch(() => ({ active_missions: [] })),
+            fetch(`${API_BASE}/api/drones/drones`).then(r => r.json()).catch(() => []),
+            fetch(`${WEATHER_URL}/api/weather/simulate/status`).then(r => r.json()).catch(() => ({ simulation_enabled: false })),
+        ]);
+
+        const activeMissions = missionsData.active_missions || [];
+        const allDrones = Array.isArray(dronesResp) ? dronesResp : [];
+        const missionByDrone = {};
+        activeMissions.forEach(m => { missionByDrone[m.drone_id] = m; });
+
+        // Clear flight paths and hazard overlays (rebuilt each frame)
+        clearFlightPaths();
+        clearHazardCircles();
+        clearWeatherCircles();
+
+        // Track which drone markers are still valid
+        const activeDroneIds = new Set();
+
+        // Build drone lookup by id for battery info
+        const droneById = {};
+        allDrones.forEach(d => { droneById[d.drone_id] = d; });
+
+        // Draw active missions
+        for (const mission of activeMissions) {
+            activeDroneIds.add(mission.drone_id);
+            drawMissionOnMap(mission, droneById[mission.drone_id]);
+        }
+
+        // Draw idle drones
+        for (const drone of allDrones) {
+            if (!missionByDrone[drone.drone_id]) {
+                activeDroneIds.add(drone.drone_id);
+                drawIdleDroneOnMap(drone);
+            }
+        }
+
+        // Remove markers for drones no longer present
+        for (const droneId of Object.keys(mapDroneMarkers)) {
+            if (!activeDroneIds.has(droneId)) {
+                mapDroneMarkers[droneId].setMap(null);
+                delete mapDroneMarkers[droneId];
+            }
+        }
+
+        // Draw hazard zones (simulation)
+        if (weatherStatus.simulation_enabled && weatherStatus.config) {
+            const zones = weatherStatus.config.hazard_zones || [];
+            drawSimulatedHazardZones(zones);
+            updateWeatherBadge("simulated", `Simulation ON - ${zones.length} hazard zone${zones.length !== 1 ? "s" : ""}`);
+        } else {
+            // Check real weather at active drone positions
+            await checkRealWeatherForMap(activeMissions);
+        }
+
+        // Update missions panel
+        updateMapMissionsPanel(activeMissions, allDrones, missionByDrone);
+
+    } catch (e) {
+        console.error("[LiveMap] Update error:", e);
+    }
+}
+
+function drawMissionOnMap(mission, droneData) {
+    const droneId = mission.drone_id;
+    const current = mission.current_coords;
+    const hospital = mission.hospital_coords;
+    const customer = mission.customer_coords;
+    const droneStart = mission.drone_start_coords || DRONE_DEPOT;
+    const phase = mission.mission_phase || mission.dispatch_status;
+    const isRerouted = mission.dispatch_status === "REROUTED_IN_FLIGHT";
+
+    // Determine marker color based on phase
+    let markerColor, statusLabel;
+    if (phase === "TO_HOSPITAL") {
+        markerColor = "#f59e0b";
+        statusLabel = "TO HOSPITAL";
+    } else if (isRerouted) {
+        markerColor = "#f97316";
+        statusLabel = "REROUTED";
+    } else {
+        markerColor = "#a855f7";
+        statusLabel = "IN FLIGHT";
+    }
+
+    // Draw flight path lines
+    const waypoints = mission.waypoints;
+    const hasWaypoints = waypoints && waypoints.length >= 2;
+
+    if (phase === "TO_HOSPITAL") {
+        // Path from drone start to hospital (active leg)
+        drawPolyline([droneStart, hospital], markerColor, 3, false);
+        // Path from hospital to customer (future leg, dashed)
+        drawPolyline([hospital, customer], "#3b82f6", 2, true);
+    } else if (hasWaypoints) {
+        // Rerouted path: drone start → hospital (completed, dim)
+        drawPolyline([droneStart, hospital], "#475569", 2, true);
+        // Original straight line shown as dim dashed for reference
+        drawPolyline([hospital, customer], "#475569", 1, true);
+        // A* rerouted waypoint path (active leg, green to indicate safe route)
+        drawPolyline(waypoints, "#22c55e", 3, false);
+    } else {
+        // Standard straight-line path
+        drawPolyline([droneStart, hospital], "#475569", 2, true);
+        drawPolyline([hospital, customer], "#3b82f6", 3, false);
+    }
+
+    // Draw waypoint markers (hospital + customer)
+    drawWaypointDot(hospital, "#f59e0b", "Hospital");
+    drawWaypointDot(customer, "#22c55e", "Destination");
+
+    // Draw/update drone marker at current position
+    updateDroneMarker(droneId, current, markerColor, statusLabel, mission, droneData);
+}
+
+function drawIdleDroneOnMap(drone) {
+    let markerColor, statusLabel;
+    switch (drone.status) {
+        case "OPERATIONAL":
+            markerColor = "#22c55e";
+            statusLabel = "AVAILABLE";
+            break;
+        case "FAULTY":
+            markerColor = "#ef4444";
+            statusLabel = "FAULTY";
+            break;
+        case "LOW_BATTERY":
+            markerColor = "#64748b";
+            statusLabel = "LOW BATTERY";
+            break;
+        case "CHARGING":
+            markerColor = "#64748b";
+            statusLabel = "CHARGING";
+            break;
+        case "RETURNING_TO_DEPOT":
+            markerColor = "#ef4444";
+            statusLabel = "RETURNING";
+            break;
+        default:
+            markerColor = "#64748b";
+            statusLabel = drone.status;
+    }
+
+    const lat = drone.current_lat != null ? drone.current_lat : drone.lat;
+    const lng = drone.current_lng != null ? drone.current_lng : drone.lng;
+    if (lat == null || lng == null) return;
+    updateDroneMarker(drone.drone_id, { lat, lng }, markerColor, statusLabel, null, drone);
+}
+
+function updateDroneMarker(droneId, position, color, statusLabel, mission, droneData) {
+    const pos = { lat: position.lat, lng: position.lng };
+
+    if (mapDroneMarkers[droneId]) {
+        // Update existing marker position smoothly
+        mapDroneMarkers[droneId].setPosition(pos);
+        mapDroneMarkers[droneId].setIcon(createDroneSVGIcon(color));
+        mapDroneMarkers[droneId]._missionData = mission;
+        mapDroneMarkers[droneId]._droneData = droneData;
+        mapDroneMarkers[droneId]._statusLabel = statusLabel;
+        mapDroneMarkers[droneId]._color = color;
+    } else {
+        const marker = new google.maps.Marker({
+            position: pos,
+            map: liveMap,
+            icon: createDroneSVGIcon(color),
+            title: droneId,
+            zIndex: mission ? 100 : 50,
+            optimized: false,
+        });
+
+        marker._missionData = mission;
+        marker._droneData = droneData;
+        marker._statusLabel = statusLabel;
+        marker._color = color;
+
+        marker.addListener("mouseover", () => showDronePopup(marker));
+        marker.addListener("click", () => showDronePopup(marker));
+
+        mapDroneMarkers[droneId] = marker;
+    }
+}
+
+function createDroneSVGIcon(color) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <circle cx="16" cy="16" r="14" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
+        <circle cx="16" cy="16" r="6" fill="${color}"/>
+        <line x1="6" y1="6" x2="12" y2="12" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="26" y1="6" x2="20" y2="12" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="6" y1="26" x2="12" y2="20" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="26" y1="26" x2="20" y2="20" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="6" cy="6" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="26" cy="6" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="6" cy="26" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="26" cy="26" r="2.5" fill="${color}" fill-opacity="0.7"/>
+    </svg>`;
+
+    return {
+        url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+        scaledSize: new google.maps.Size(36, 36),
+        anchor: new google.maps.Point(18, 18),
+    };
+}
+
+function showDronePopup(marker) {
+    const droneId = marker.getTitle();
+    const mission = marker._missionData;
+    const drone = marker._droneData;
+    const statusLabel = marker._statusLabel;
+    const color = marker._color;
+
+    let badgeBg, badgeColor;
+    switch (statusLabel) {
+        case "IN FLIGHT":
+        case "REROUTED":
+            badgeBg = "rgba(168,85,247,0.2)"; badgeColor = "#c084fc"; break;
+        case "TO HOSPITAL":
+            badgeBg = "rgba(245,158,11,0.2)"; badgeColor = "#fbbf24"; break;
+        case "AVAILABLE":
+            badgeBg = "rgba(34,197,94,0.2)"; badgeColor = "#4ade80"; break;
+        case "FAULTY":
+        case "RETURNING":
+            badgeBg = "rgba(239,68,68,0.2)"; badgeColor = "#f87171"; break;
+        default:
+            badgeBg = "rgba(100,116,139,0.2)"; badgeColor = "#94a3b8";
+    }
+
+    let gridRows = "";
+
+    if (mission) {
+        const bat = drone ? drone.battery : "N/A";
+        const batNum = typeof bat === "number" ? bat : 0;
+        const batColor = batNum >= 60 ? "#22c55e" : batNum >= 30 ? "#eab308" : "#ef4444";
+
+        gridRows = `
+            <div class="label">Order ID</div><div class="value">${mission.order_id}</div>
+            <div class="label">Phase</div><div class="value">${mission.mission_phase || mission.dispatch_status}</div>
+            <div class="label">ETA</div><div class="value">${mission.eta_minutes != null ? Math.round(mission.eta_minutes * 10) / 10 + " min" : "N/A"}</div>
+            <div class="label">Battery</div><div class="value">
+                <span class="popup-battery-bar"><span class="popup-battery-fill" style="width:${batNum}%;background:${batColor}"></span></span>${bat}%
+            </div>
+            <div class="label">Position</div><div class="value">${mission.current_coords.lat.toFixed(4)}, ${mission.current_coords.lng.toFixed(4)}</div>
+            <div class="label">Hospital</div><div class="value">${mission.hospital_coords.lat.toFixed(4)}, ${mission.hospital_coords.lng.toFixed(4)}</div>
+            <div class="label">Customer</div><div class="value">${mission.customer_coords.lat.toFixed(4)}, ${mission.customer_coords.lng.toFixed(4)}</div>
+        `;
+
+        if (mission.reroute_details) {
+            const rd = mission.reroute_details;
+            gridRows += `
+                <div class="label" style="color:#fbbf24">Detour</div><div class="value" style="color:#fbbf24">+${Math.round(rd.detour_percentage)}%</div>
+                <div class="label">Waypoints</div><div class="value">${rd.waypoint_count}</div>
+            `;
+        }
+    } else if (drone) {
+        const batNum = drone.battery || 0;
+        const batColor = batNum >= 60 ? "#22c55e" : batNum >= 30 ? "#eab308" : "#ef4444";
+        const droneLat = drone.lat;
+        const droneLng = drone.lng;
+
+        gridRows = `
+            <div class="label">Battery</div><div class="value">
+                <span class="popup-battery-bar"><span class="popup-battery-fill" style="width:${batNum}%;background:${batColor}"></span></span>${batNum}%
+            </div>
+            <div class="label">Position</div><div class="value">${droneLat.toFixed(4)}, ${droneLng.toFixed(4)}</div>
+        `;
+    }
+
+    const html = `
+        <div class="drone-popup">
+            <div class="drone-popup-header">
+                <span class="popup-icon">&#9992;</span>
+                <span class="popup-title">${droneId}</span>
+                <span class="popup-badge" style="background:${badgeBg};color:${badgeColor}">${statusLabel}</span>
+            </div>
+            <div class="drone-popup-grid">${gridRows}</div>
+        </div>
+    `;
+
+    mapInfoWindow.setContent(html);
+    mapInfoWindow.open(liveMap, marker);
+}
+
+function drawPolyline(points, color, weight, dashed) {
+    const path = points.map(p => ({ lat: p.lat, lng: p.lng }));
+    const opts = {
+        path: path,
+        geodesic: true,
+        strokeColor: color,
+        strokeOpacity: dashed ? 0 : 0.9,
+        strokeWeight: weight,
+        map: liveMap,
+    };
+
+    if (dashed) {
+        opts.strokeOpacity = 0;
+        opts.icons = [{
+            icon: { path: "M 0,-1 0,1", strokeOpacity: 0.5, scale: weight },
+            offset: "0",
+            repeat: "12px",
+        }];
+    }
+
+    const line = new google.maps.Polyline(opts);
+    mapFlightPaths.push(line);
+}
+
+function drawWaypointDot(position, color, label) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12">
+        <circle cx="6" cy="6" r="5" fill="${color}" fill-opacity="0.3" stroke="${color}" stroke-width="1.5"/>
+        <circle cx="6" cy="6" r="2" fill="${color}"/>
+    </svg>`;
+
+    const marker = new google.maps.Marker({
+        position: { lat: position.lat, lng: position.lng },
+        map: liveMap,
+        icon: {
+            url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+            scaledSize: new google.maps.Size(14, 14),
+            anchor: new google.maps.Point(7, 7),
+        },
+        title: label,
+        zIndex: 30,
+        clickable: false,
+    });
+    mapFlightPaths.push(marker);
+}
+
+function drawSimulatedHazardZones(zones) {
+    for (const zone of zones) {
+        const circle = new google.maps.Circle({
+            center: { lat: zone.lat, lng: zone.lng },
+            radius: (zone.radius_km || 2.0) * 1000,
+            strokeColor: "#ef4444",
+            strokeOpacity: 0.7,
+            strokeWeight: 2,
+            fillColor: "#ef4444",
+            fillOpacity: 0.12,
+            map: liveMap,
+            zIndex: 20,
+        });
+        mapHazardCircles.push(circle);
+    }
+}
+
+async function checkRealWeatherForMap(activeMissions) {
+    const now = Date.now();
+    if (now - mapLastWeatherCheck < WEATHER_CHECK_INTERVAL_MS) {
+        // Use cached results - redraw cached weather circles
+        redrawCachedWeatherCircles();
+        return;
+    }
+    mapLastWeatherCheck = now;
+
+    // Collect unique points to check
+    const pointsToCheck = [];
+
+    // Check depot weather
+    pointsToCheck.push({ lat: DRONE_DEPOT.lat, lng: DRONE_DEPOT.lng, label: "Depot" });
+
+    // Check active mission positions and destinations
+    for (const mission of activeMissions) {
+        if (mission.current_coords) {
+            pointsToCheck.push({
+                lat: mission.current_coords.lat,
+                lng: mission.current_coords.lng,
+                label: `${mission.drone_id} position`,
+            });
+        }
+        if (mission.customer_coords) {
+            pointsToCheck.push({
+                lat: mission.customer_coords.lat,
+                lng: mission.customer_coords.lng,
+                label: `${mission.drone_id} destination`,
+            });
+        }
+    }
+
+    // Check weather at each point (limit to 6 checks per cycle)
+    const checks = pointsToCheck.slice(0, 6);
+    const newCache = {};
+    let hasUnsafe = false;
+
+    const results = await Promise.all(
+        checks.map(pt =>
+            fetch(`${API_BASE}/api/weather/weather/check?lat=${pt.lat}&lng=${pt.lng}`)
+                .then(r => r.json())
+                .catch(() => ({ status: "SAFE" }))
+        )
+    );
+
+    for (let i = 0; i < checks.length; i++) {
+        const pt = checks[i];
+        const result = results[i];
+        const key = `${pt.lat.toFixed(3)}_${pt.lng.toFixed(3)}`;
+
+        if (result.status === "UNSAFE") {
+            hasUnsafe = true;
+            newCache[key] = {
+                lat: pt.lat,
+                lng: pt.lng,
+                reasons: result.reasons || [],
+                wind: result.wind_speed_kmh || 0,
+            };
+        }
+    }
+
+    mapWeatherCache = newCache;
+
+    if (hasUnsafe) {
+        const reasons = [...new Set(Object.values(newCache).flatMap(c => c.reasons))];
+        updateWeatherBadge("unsafe", `UNSAFE: ${reasons.join(", ")}`);
+    } else {
+        updateWeatherBadge("safe", "Weather Clear");
+    }
+
+    redrawCachedWeatherCircles();
+}
+
+function redrawCachedWeatherCircles() {
+    for (const data of Object.values(mapWeatherCache)) {
+        const circle = new google.maps.Circle({
+            center: { lat: data.lat, lng: data.lng },
+            radius: 2000,
+            strokeColor: "#f59e0b",
+            strokeOpacity: 0.6,
+            strokeWeight: 2,
+            fillColor: "#f59e0b",
+            fillOpacity: 0.1,
+            map: liveMap,
+            zIndex: 15,
+        });
+        mapWeatherCircles.push(circle);
+    }
+}
+
+function updateWeatherBadge(type, text) {
+    const badge = document.getElementById("map-weather-badge");
+    const icon = document.getElementById("map-weather-icon");
+    const label = document.getElementById("map-weather-label");
+
+    badge.classList.remove("safe", "unsafe", "simulated");
+    if (type === "safe") {
+        badge.classList.add("safe");
+        icon.innerHTML = "&#9729;";
+    } else if (type === "unsafe") {
+        badge.classList.add("unsafe");
+        icon.innerHTML = "&#9888;";
+    } else if (type === "simulated") {
+        badge.classList.add("simulated");
+        icon.innerHTML = "&#9889;";
+    }
+
+    label.textContent = text;
+}
+
+function updateMapMissionsPanel(missions, allDrones, missionByDrone) {
+    const countEl = document.getElementById("map-mission-count");
+    const listEl = document.getElementById("map-missions-list");
+    countEl.textContent = missions.length;
+
+    if (missions.length === 0) {
+        listEl.innerHTML = '<div style="font-size:11px; color:#64748b; padding:8px 0;">No active missions</div>';
+        return;
+    }
+
+    listEl.innerHTML = missions.map(m => {
+        const phase = m.mission_phase || m.dispatch_status;
+        const eta = m.eta_minutes != null ? Math.round(m.eta_minutes * 10) / 10 : "?";
+        const isRerouted = m.dispatch_status === "REROUTED_IN_FLIGHT";
+
+        return `
+            <div class="map-mission-item" onclick="focusMapOnMission('${m.order_id}')">
+                <div class="mission-label">${m.drone_id} &rarr; ${m.order_id}</div>
+                <div class="mission-detail">
+                    ${phase}${isRerouted ? " (rerouted)" : ""} &bull; ETA ${eta} min
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
+function focusMapOnMission(orderId) {
+    // Find the drone marker for this mission
+    for (const [droneId, marker] of Object.entries(mapDroneMarkers)) {
+        if (marker._missionData && marker._missionData.order_id === orderId) {
+            liveMap.panTo(marker.getPosition());
+            liveMap.setZoom(14);
+            showDronePopup(marker);
+            break;
+        }
+    }
+}
+
+function clearFlightPaths() {
+    mapFlightPaths.forEach(obj => obj.setMap(null));
+    mapFlightPaths = [];
+}
+
+function clearHazardCircles() {
+    mapHazardCircles.forEach(c => c.setMap(null));
+    mapHazardCircles = [];
+}
+
+function clearWeatherCircles() {
+    mapWeatherCircles.forEach(c => c.setMap(null));
+    mapWeatherCircles = [];
 }

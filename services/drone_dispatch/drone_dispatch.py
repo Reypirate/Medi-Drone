@@ -71,6 +71,46 @@ def haversine(lat1, lng1, lat2, lng2):
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
 
 
+def interpolate_along_waypoints(waypoints, progress_fraction):
+    """
+    Interpolate position along a waypoint path based on progress fraction (0.0 to 1.0).
+    Distributes progress proportionally across segment distances.
+    """
+    if not waypoints or len(waypoints) < 2:
+        return None
+
+    # Calculate cumulative distances along the path
+    segment_distances = []
+    for i in range(len(waypoints) - 1):
+        d = haversine(
+            waypoints[i]["lat"], waypoints[i]["lng"],
+            waypoints[i + 1]["lat"], waypoints[i + 1]["lng"]
+        )
+        segment_distances.append(d)
+
+    total_distance = sum(segment_distances)
+    if total_distance == 0:
+        return waypoints[0]
+
+    # Find which segment the drone is on
+    target_distance = progress_fraction * total_distance
+    cumulative = 0.0
+
+    for i, seg_dist in enumerate(segment_distances):
+        if cumulative + seg_dist >= target_distance or i == len(segment_distances) - 1:
+            # Drone is on this segment
+            if seg_dist == 0:
+                return waypoints[i]
+            segment_progress = (target_distance - cumulative) / seg_dist
+            segment_progress = max(0.0, min(1.0, segment_progress))
+            lat = waypoints[i]["lat"] + segment_progress * (waypoints[i + 1]["lat"] - waypoints[i]["lat"])
+            lng = waypoints[i]["lng"] + segment_progress * (waypoints[i + 1]["lng"] - waypoints[i]["lng"])
+            return {"lat": lat, "lng": lng}
+        cumulative += seg_dist
+
+    return waypoints[-1]
+
+
 def get_depot_location():
     """Fetch central charging depot location from drone-management service."""
     try:
@@ -641,13 +681,31 @@ def poll_active_missions():
 
             # Update drone position (simulate movement towards destination)
             if "current_coords" in mission and "customer_coords" in mission:
-                progress_fraction = 1 - (mission["eta_minutes"] / max(mission.get("initial_eta", mission["eta_minutes"] + 1), 1))
-                new_lat = mission["hospital_coords"]["lat"] + progress_fraction * (
-                    mission["customer_coords"]["lat"] - mission["hospital_coords"]["lat"]
-                )
-                new_lng = mission["hospital_coords"]["lng"] + progress_fraction * (
-                    mission["customer_coords"]["lng"] - mission["hospital_coords"]["lng"]
-                )
+                waypoints = mission.get("waypoints")
+                if waypoints and len(waypoints) >= 2:
+                    # Rerouted: progress is based only on the waypoint leg's own ETA
+                    # waypoint_initial_eta = the ETA returned by A* at reroute time
+                    wp_initial = mission.get("waypoint_initial_eta", mission.get("initial_eta", 1))
+                    wp_progress = 1 - (mission["eta_minutes"] / max(wp_initial, 0.1))
+                    wp_progress = max(0.0, min(1.0, wp_progress))
+
+                    new_pos = interpolate_along_waypoints(waypoints, wp_progress)
+                    if new_pos:
+                        new_lat = new_pos["lat"]
+                        new_lng = new_pos["lng"]
+                    else:
+                        new_lat = mission["current_coords"]["lat"]
+                        new_lng = mission["current_coords"]["lng"]
+                else:
+                    # Standard straight-line interpolation (hospital → customer)
+                    progress_fraction = 1 - (mission["eta_minutes"] / max(mission.get("initial_eta", mission["eta_minutes"] + 1), 1))
+                    progress_fraction = max(0.0, min(1.0, progress_fraction))
+                    new_lat = mission["hospital_coords"]["lat"] + progress_fraction * (
+                        mission["customer_coords"]["lat"] - mission["hospital_coords"]["lat"]
+                    )
+                    new_lng = mission["hospital_coords"]["lng"] + progress_fraction * (
+                        mission["customer_coords"]["lng"] - mission["hospital_coords"]["lng"]
+                    )
                 mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
 
                 # Update position in drone management
@@ -740,11 +798,16 @@ def poll_active_missions():
                 print(f"  [REROUTE] Route summary: {route_summary}")
                 print(f"  [REROUTE] New ETA: {new_eta_minutes:.1f} minutes")
 
-                # Store comprehensive reroute details in mission object
+                # Store comprehensive reroute details and waypoints in mission object
                 mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
                 mission["route_id"] = reroute_data.get("route_id")
                 mission["updated_eta"] = reroute_data.get("updated_eta")
-                # Store comprehensive reroute details in mission object
+                # Store A* waypoints for position interpolation along rerouted path
+                mission["waypoints"] = reroute_data.get("waypoints", [])
+                # The ETA for the waypoint leg alone (used as denominator for waypoint progress)
+                mission["waypoint_initial_eta"] = new_eta_minutes
+                # Snapshot the drone's position at reroute time as the waypoint path origin
+                mission["reroute_start_coords"] = mission["current_coords"].copy()
                 mission["reroute_details"] = {
                     "original_distance_km": original_distance_km,
                     "new_distance_km": new_distance_km,
