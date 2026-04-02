@@ -819,6 +819,38 @@
         #map-weather-badge.unsafe { border-color: rgba(239,68,68,0.4); color: #f87171; }
         #map-weather-badge.simulated { border-color: rgba(245,158,11,0.4); color: #fbbf24; }
 
+        #map-fastforward-badge {
+            position: absolute;
+            top: 12px;
+            left: 160px;
+            z-index: 10;
+        }
+        #map-fastforward-badge button {
+            background: rgba(15, 23, 42, 0.92);
+            border: 1px solid #334155;
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 12px;
+            color: #94a3b8;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        #map-fastforward-badge button:hover {
+            background: rgba(30, 41, 59, 0.95);
+            border-color: #475569;
+        }
+        #map-fastforward-badge button.active {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: rgba(59, 130, 246, 0.4);
+            color: #3b82f6;
+        }
+        #map-fastforward-badge button.active #ff-indicator {
+            display: inline;
+        }
+
         .gm-style .gm-style-iw-c {
             background: #1e293b !important;
             border: 1px solid #334155 !important;
@@ -1080,6 +1112,20 @@
                     <div id="sim-status-content" style="font-size:13px; color:#94a3b8;">Loading...</div>
                 </div>
 
+                <!-- Reset All Drones -->
+                <div style="margin-bottom:24px; padding:16px; background:linear-gradient(135deg, rgba(239,68,68,0.1) 0%, rgba(185,28,28,0.05) 100%); border-radius:12px; border:2px solid #ef4444;">
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+                        <span style="font-size:18px;">&#9888;</span>
+                        <div>
+                            <div style="font-size:14px; font-weight:700; color:#ef4444;">Emergency Drone Reset</div>
+                            <div style="font-size:12px; color:#94a3b8;">Cancel all missions and return all drones to central depot</div>
+                        </div>
+                    </div>
+                    <button onclick="resetAllDrones()" id="reset-drones-btn" style="width:100%; padding:12px; background:#ef4444; color:white; border:none; border-radius:8px; font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 4px 12px rgba(239,68,68,0.3); transition:background 0.2s;">
+                        &#128165; Reset All Drones to Depot
+                    </button>
+                </div>
+
                 <!-- MODE 1: Cancellation Simulation -->
                 <div style="margin-bottom:24px; padding:20px; background:linear-gradient(135deg, rgba(239,68,68,0.1) 0%, rgba(185,28,28,0.05) 100%); border-radius:12px; border:2px solid #ef4444;">
                     <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
@@ -1191,6 +1237,14 @@
                     <button onclick="enableReroutingMode()" style="width:100%; margin-top:16px; padding:14px; background:#3b82f6; color:white; border:none; border-radius:8px; font-size:15px; font-weight:700; cursor:pointer; box-shadow:0 4px 12px rgba(59,130,246,0.3);">
                         &#127795; Activate Rerouting Mode
                     </button>
+
+                    <!-- Simulation Mode Status Indicator -->
+                    <div id="simulation-status-indicator" style="margin-top:12px; padding:10px; background:#1e293b; border-radius:6px; font-size:12px; display:none;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span id="simulation-status-icon" style="font-size:16px;">&#128308;</span>
+                            <span id="simulation-status-text" style="color:#cbd5e1;">Checking status...</span>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Global Disable Button -->
@@ -1252,6 +1306,13 @@
             <div id="map-weather-badge">
                 <span id="map-weather-icon">&#9729;</span>
                 <span id="map-weather-label">Checking...</span>
+            </div>
+            <div id="map-fastforward-badge">
+                <button id="fastforward-btn" onclick="toggleFastForward()">
+                    <span id="ff-icon">&#9194;</span>
+                    <span id="ff-label">Fast-Forward</span>
+                    <span id="ff-indicator" style="display:none;">10x</span>
+                </button>
             </div>
         </div>
     </div>
