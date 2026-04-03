@@ -64,7 +64,7 @@ reserved_drones = set()  # Track drones that have been reserved but not yet in f
 order_drone_reservations = {}  # Map order_id -> drone_id for cleanup before active_missions is populated
 
 # Fast-forward simulation mode
-fast_forward_mode = {"enabled": False, "multiplier": 10.0}  # 10x speed by default
+fast_forward_mode = {"enabled": False, "multiplier": 4.0}  # 4x speed by default
 
 
 def haversine(lat1, lng1, lat2, lng2):
@@ -1458,7 +1458,7 @@ def fastforward_mode():
     if request.method == "POST":
         data = request.get_json() or {}
         enabled = data.get("enabled", False)
-        multiplier = data.get("multiplier", 10.0)
+        multiplier = data.get("multiplier", 4.0)
 
         fast_forward_mode["enabled"] = enabled
         fast_forward_mode["multiplier"] = max(1.0, min(100.0, multiplier))  # Clamp between 1x and 100x

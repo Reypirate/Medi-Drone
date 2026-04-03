@@ -1244,7 +1244,7 @@ async function toggleFastForward() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 enabled: newState,
-                multiplier: 10.0  // 10x speed
+                multiplier: 4.0  // 4x speed
             })
         });
 
@@ -1871,7 +1871,7 @@ const MAP_POLL_MS = 3000;
 const WEATHER_CHECK_INTERVAL_MS = 15000;
 
 // Fast-forward simulation mode
-let fastForwardMode = { enabled: false, multiplier: 10 };
+let fastForwardMode = { enabled: false, multiplier: 4 };
 
 const DARK_MAP_STYLE = [
     { elementType: "geometry", stylers: [{ color: "#1d2c4d" }] },
