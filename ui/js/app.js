@@ -10,6 +10,7 @@ let validatedAddress = null;
 let addressConfirmed = false;
 let currentOrderTab = "active";
 let deletePendingOrderId = null;
+let cancelPendingOrderId = null;
 
 // ── Urgency selector ──────────────────────────────────────────────
 
@@ -428,7 +429,11 @@ function showDeleteDialog(orderId, orderInfo) {
 
 function closeConfirmDialog() {
     deletePendingOrderId = null;
+    cancelPendingOrderId = null;
     deleteAllMode = false;
+    // Reset confirm button text back to "Delete"
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+    if (confirmBtn) confirmBtn.textContent = "Delete";
     document.getElementById("confirm-dialog").classList.add("hidden");
 }
 
@@ -449,6 +454,44 @@ async function confirmDeleteOrder() {
         }
     } catch (e) {
         addLog(`Error deleting order: ${e.message}`, "error");
+    } finally {
+        closeConfirmDialog();
+    }
+}
+
+// ── Cancel order with confirmation ───────────────────────────────────
+
+function showCancelDialog(orderId) {
+    cancelPendingOrderId = orderId;
+    const messageEl = document.getElementById("confirm-message");
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+
+    messageEl.textContent = `Are you sure you want to cancel order ${orderId}? Reserved stock will be released and the drone will return to depot.`;
+    confirmBtn.textContent = "Cancel Order";
+    confirmBtn.onclick = () => confirmCancelOrder();
+    document.getElementById("confirm-dialog").classList.remove("hidden");
+}
+
+async function confirmCancelOrder() {
+    if (!cancelPendingOrderId) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/order/order/${cancelPendingOrderId}/cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "USER_REQUEST" })
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            addLog(`Order ${cancelPendingOrderId} cancelled: ${data.message}`, "success");
+            refreshOrders();
+        } else {
+            const data = await resp.json();
+            addLog(`Cancel failed: ${data.error || data.message}`, "error");
+        }
+    } catch (e) {
+        addLog(`Error cancelling order: ${e.message}`, "error");
     } finally {
         closeConfirmDialog();
     }
@@ -563,6 +606,12 @@ async function refreshOrders() {
             const badgeLabel = getBadgeLabel(o.status);
             const missionPhase = o.mission_phase || o.dispatch_status;
 
+            // Cancel button: show for active orders that are cancellable (not already cancelled/delivered/failed)
+            const canCancel = currentOrderTab === "active" &&
+                               !o.status.includes("CANCELLED") &&
+                               o.status !== "DELIVERED" &&
+                               !o.status.includes("FAIL");
+
             // Display ETA countdown for dispatched orders
             let etaDisplay = "";
             let phaseDisplay = "";
@@ -596,7 +645,10 @@ async function refreshOrders() {
                     <div class="order-header">
                         <span class="order-id">${o.order_id}</span>
                         <span class="badge ${badgeClass}">${badgeLabel}</span>
-                        ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
+                        <div style="display:flex; gap:6px; margin-left:auto;">
+                            ${canCancel ? `<button class="cancel-btn" onclick="showCancelDialog('${o.order_id}')">Cancel Order</button>` : ""}
+                            ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
+                        </div>
                     </div>
                     <div class="order-details">
                         <div>Hospital: <span class="order-detail-value">${o.hospital_name || o.hospital_id || "Auto"}</span></div>

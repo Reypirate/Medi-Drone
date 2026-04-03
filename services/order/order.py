@@ -21,6 +21,7 @@ init_flask_request_tracking(app)
 
 INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://inventory:5003")
 HOSPITAL_URL  = os.environ.get("HOSPITAL_URL",  "http://hospital:5005")
+DISPATCH_URL  = os.environ.get("DISPATCH_URL",  "http://drone-dispatch:5002")
 
 amqp_channel    = None
 amqp_connection = None
@@ -376,6 +377,18 @@ def cancel_order(order_id):
     order = db_get_order(order_id)
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
+
+    # Notify drone-dispatch to abort the mission if one exists
+    try:
+        http_requests.post(
+            f"{os.environ.get('DISPATCH_URL', 'http://drone-dispatch:5002')}/dispatch/missions/{order_id}/abort",
+            json={"reason": reason},
+            timeout=10,
+        )
+        print(f"  [ORDER] Notified drone-dispatch to abort mission {order_id}")
+    except Exception as e:
+        # Non-blocking - mission may not exist or service unavailable
+        print(f"  [ORDER] Warning: could not notify drone-dispatch to abort mission {order_id}: {e}")
 
     released = False
     try:

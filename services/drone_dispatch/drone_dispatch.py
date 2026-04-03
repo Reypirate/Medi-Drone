@@ -1203,6 +1203,49 @@ def get_mission(order_id):
     return jsonify(mission)
 
 
+@app.route("/dispatch/missions/<order_id>/abort", methods=["POST"])
+def abort_mission(order_id):
+    """Abort an active mission (called by Order Service when order is cancelled)."""
+    mission = active_missions.get(order_id)
+    if not mission:
+        # Mission may have already been cleaned up - return success (idempotent)
+        return jsonify({"order_id": order_id, "status": "MISSION_NOT_FOUND", "message": "Mission already cleaned up or never existed"}), 200
+
+    data = request.get_json() or {}
+    reason = data.get("reason", "USER_CANCELLED")
+
+    # Update mission status before cleanup
+    mission["dispatch_status"] = f"ABORTED_{reason}"
+
+    # Get drone_id before removing mission
+    drone_id = mission.get("drone_id")
+
+    # Return drone to depot
+    if drone_id:
+        try:
+            http_requests.patch(
+                f"{DRONE_MGMT_URL}/drones/{drone_id}/status",
+                json={"status": "RETURNING_TO_DEPOT",
+                      "lat": mission["current_coords"]["lat"],
+                      "lng": mission["current_coords"]["lng"]},
+                timeout=10,
+            )
+            print(f"  [ABORT] Drone {drone_id} returning to depot for cancelled order {order_id}")
+        except Exception as e:
+            print(f"  [ABORT] Warning: could not update drone status: {e}")
+
+    # Remove from active missions
+    del active_missions[order_id]
+    print(f"  [ABORT] Mission {order_id} aborted due to {reason}")
+
+    return jsonify({
+        "order_id": order_id,
+        "drone_id": drone_id,
+        "status": "ABORTED",
+        "reason": reason
+    })
+
+
 @app.route("/dispatch/simulate/weather", methods=["POST"])
 def simulate_weather_poll():
     """Debug endpoint: manually trigger weather poll for a specific mission."""
