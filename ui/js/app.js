@@ -791,6 +791,28 @@ async function searchInventory() {
     }
 }
 
+async function restockInventory() {
+    const btn = document.getElementById("restock-btn");
+    btn.disabled = true;
+    btn.textContent = "Restocking...";
+    try {
+        const resp = await fetch(`${API_BASE}/api/inventory/inventory/restock`, { method: "POST" });
+        const data = await resp.json();
+        if (data.status === "RESTOCKED") {
+            btn.textContent = "Restocked!";
+            searchInventory();
+            setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
+        } else {
+            btn.textContent = "Restock Failed";
+            setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
+        }
+    } catch (e) {
+        console.error("[Restock Error]", e);
+        btn.textContent = "Restock Failed";
+        setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
+    }
+}
+
 // ── Drone fleet ──────────────────────────────────────────────────
 
 async function loadDrones() {

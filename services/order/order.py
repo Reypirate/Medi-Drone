@@ -142,7 +142,7 @@ def db_list_orders(status_filter: str | None = None) -> list[dict]:
         if status_filter == "active":
             cursor.execute("""
                 SELECT * FROM orders
-                WHERE status IN ('CONFIRMED','TO_HOSPITAL','TO_CUSTOMER','IN_TRANSIT','DISPATCHED')
+                WHERE status IN ('CONFIRMED','TO_HOSPITAL','TO_CUSTOMER','IN_TRANSIT','IN_FLIGHT','REROUTED_IN_FLIGHT','DISPATCHED')
                 ORDER BY created_at DESC
             """)
         elif status_filter == "cancelled":

@@ -1365,7 +1365,7 @@ def reset_all_drones():
 
     # First, get all orders from order service and cancel any with active statuses
     # This handles orphaned orders that aren't in active_missions (e.g., after service restart)
-    active_statuses = ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED"]
+    active_statuses = ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "IN_FLIGHT", "REROUTED_IN_FLIGHT", "DISPATCHED"]
     try:
         resp = http_requests.get(f"{ORDER_URL}/orders", timeout=10)
         if resp.ok:
