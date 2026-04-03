@@ -536,7 +536,7 @@ async function refreshOrders() {
 
         // For active tab, also filter by status
         if (currentOrderTab === "active") {
-            orders = orders.filter(o => ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED"].includes(o.status));
+            orders = orders.filter(o => ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "IN_FLIGHT", "REROUTED_IN_FLIGHT", "DISPATCHED"].includes(o.status));
         }
 
         const list = document.getElementById("orders-list");
@@ -1232,7 +1232,7 @@ async function toggleFastForward() {
             fastForwardMode.multiplier = data.multiplier;
 
             if (fastForwardMode.enabled) {
-                icon.textContent = "&#9205;";
+                icon.innerHTML = "&#9193;";
                 label.textContent = `${fastForwardMode.multiplier}x Speed`;
                 indicator.style.display = "inline";
                 btn.style.background = "rgba(34, 197, 94, 0.2)";
@@ -1241,7 +1241,7 @@ async function toggleFastForward() {
                 // Restart map polling with faster interval
                 startMapPolling();
             } else {
-                icon.textContent = "&#9194;";
+                icon.innerHTML = "&#9193;";
                 label.textContent = "Fast-Forward";
                 indicator.style.display = "none";
                 btn.style.background = "rgba(30,41,59,0.9)";
@@ -1696,33 +1696,41 @@ async function autoPlaceHazard() {
             return;
         }
 
-        // Use selected mission if available, otherwise find first IN_FLIGHT mission
+        // Use selected mission if available, otherwise find first active mission
+        // Accept TO_HOSPITAL, IN_FLIGHT, and REROUTED_IN_FLIGHT statuses
+        const activeStatuses = ["TO_HOSPITAL", "TO_CUSTOMER", "IN_FLIGHT", "REROUTED_IN_FLIGHT"];
         let mission;
         if (selectedMissionId) {
-            mission = missionsData.active_missions.find(m => m.order_id === selectedMissionId);
+            mission = missionsData.active_missions.find(m =>
+                m.order_id === selectedMissionId && activeStatuses.includes(m.dispatch_status)
+            );
             if (!mission) {
-                addSimLog(`&#9888; Selected mission ${selectedMissionId} not found. Using first IN_FLIGHT mission.`);
+                addSimLog(`&#9888; Selected mission ${selectedMissionId} not active. Using first active mission.`);
                 mission = missionsData.active_missions.find(m =>
-                    m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+                    activeStatuses.includes(m.dispatch_status)
                 );
             }
         } else {
             mission = missionsData.active_missions.find(m =>
-                m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+                activeStatuses.includes(m.dispatch_status)
             );
         }
 
         if (!mission) {
-            addSimLog(`&#9888; No in-flight missions found.`);
+            addSimLog(`&#9888; No active missions found.`);
             return;
         }
 
         const current = mission.current_coords;
-        const customer = mission.customer_coords;
+        const phase = mission.mission_phase || mission.dispatch_status;
+        // Use the correct destination based on mission phase:
+        // TO_HOSPITAL: drone is flying to hospital, so destination is hospital
+        // TO_CUSTOMER/IN_FLIGHT/REROUTED: drone is flying to customer
+        const destination = (phase === "TO_HOSPITAL") ? mission.hospital_coords : mission.customer_coords;
         const waypoints = mission.waypoints || [];
 
         // Calculate midpoint along the actual flight path (accounts for rerouting)
-        const midpoint = calculatePathMidpoint(current, customer, waypoints);
+        const midpoint = calculatePathMidpoint(current, destination, waypoints);
         const midLat = midpoint.lat;
         const midLng = midpoint.lng;
 
@@ -1730,7 +1738,7 @@ async function autoPlaceHazard() {
         let remainingDistanceKm;
         if (waypoints && waypoints.length >= 2) {
             // Calculate total path distance through waypoints
-            const fullPath = [current, ...waypoints, customer];
+            const fullPath = [current, ...waypoints, destination];
             remainingDistanceKm = 0;
             for (let i = 0; i < fullPath.length - 1; i++) {
                 remainingDistanceKm += haversineDistance(
@@ -1740,7 +1748,7 @@ async function autoPlaceHazard() {
             }
         } else {
             // Direct path distance
-            remainingDistanceKm = haversineDistance(current.lat, current.lng, customer.lat, customer.lng);
+            remainingDistanceKm = haversineDistance(current.lat, current.lng, destination.lat, destination.lng);
         }
 
         // Recommended radius: 12% of remaining distance, min 0.3km, max 1.5km
@@ -1766,7 +1774,7 @@ async function autoPlaceHazard() {
         addSimLog(`&nbsp;&nbsp;&#128205; Midpoint: (${midLat.toFixed(4)}, ${midLng.toFixed(4)})`);
         addSimLog(`&nbsp;&nbsp;&#10142; <strong>Flight Path:</strong>`);
         addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;From: (${current.lat.toFixed(4)}, ${current.lng.toFixed(4)})`);
-        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;To: (${customer.lat.toFixed(4)}, ${customer.lng.toFixed(4)})`);
+        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;To: (${destination.lat.toFixed(4)}, ${destination.lng.toFixed(4)}) [${phase === "TO_HOSPITAL" ? "Hospital" : "Customer"}]`);
         addSimLog(`&nbsp;&nbsp;&#128165; <strong>Hazard inputs populated:</strong>`);
         addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;Lat: ${midLat.toFixed(6)}, Lng: ${midLng.toFixed(6)}, Radius: ${recommendedRadius.toFixed(2)}km (recommended)`);
         addSimLog(`&nbsp;&nbsp;&#9888; <strong>Review above, then click "Add Hazard Zone" to add it</strong>`);

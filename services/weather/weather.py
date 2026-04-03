@@ -215,10 +215,10 @@ def fetch_active_mission():
         data = resp.json()
         missions = data.get("active_missions", [])
 
-        # Return first mission with IN_FLIGHT or REROUTED_IN_FLIGHT status
+        # Return first mission with an active flight status
         for mission in missions:
             dispatch_status = mission.get("dispatch_status")
-            if dispatch_status in ("IN_FLIGHT", "REROUTED_IN_FLIGHT"):
+            if dispatch_status in ("TO_HOSPITAL", "TO_CUSTOMER", "IN_FLIGHT", "REROUTED_IN_FLIGHT"):
                 return mission
 
         return None
@@ -235,9 +235,9 @@ def auto_hazard():
 
     This endpoint:
     1. Auto-enables simulation mode if not enabled
-    2. Fetches the first active IN_FLIGHT or REROUTED_IN_FLIGHT mission
+    2. Fetches the first active mission (TO_HOSPITAL, TO_CUSTOMER, IN_FLIGHT, or REROUTED_IN_FLIGHT)
     3. Validates ETA is >= 2 minutes (too late to reroute if less)
-    4. Calculates midpoint of current_coords to customer_coords
+    4. Calculates midpoint of current_coords to the correct destination (hospital or customer based on phase)
     5. Creates a hazard zone at that midpoint
     6. Returns comprehensive response with mission details
     """
@@ -257,7 +257,7 @@ def auto_hazard():
     if not mission:
         return jsonify({
             "error": "No active missions found",
-            "message": "No missions with dispatch_status IN_FLIGHT or REROUTED_IN_FLIGHT",
+            "message": "No missions with an active flight status",
             "suggestion": "Create an order and wait for it to be dispatched"
         }), 404
 
@@ -279,19 +279,23 @@ def auto_hazard():
     data = request.get_json() or {}
     radius_km = data.get("radius_km", 2.0)
 
-    # Extract coordinates
+    # Extract coordinates - use correct destination based on mission phase
     current_coords = mission.get("current_coords")
-    customer_coords = mission.get("customer_coords")
+    mission_phase = mission.get("mission_phase", mission.get("dispatch_status"))
+    if mission_phase == "TO_HOSPITAL":
+        destination_coords = mission.get("hospital_coords")
+    else:
+        destination_coords = mission.get("customer_coords")
 
-    if not current_coords or not customer_coords:
+    if not current_coords or not destination_coords:
         return jsonify({
             "error": "Mission coordinates missing",
-            "message": "Mission does not have current_coords or customer_coords",
+            "message": "Mission does not have current_coords or destination coordinates",
             "mission_details": mission
         }), 400
 
-    # Calculate hazard zone at midpoint
-    hazard_zone = calculate_flight_path_midpoint(current_coords, customer_coords)
+    # Calculate hazard zone at midpoint of current flight path
+    hazard_zone = calculate_flight_path_midpoint(current_coords, destination_coords)
     hazard_zone["radius_km"] = radius_km
 
     # Add to simulation hazard zones
@@ -324,10 +328,11 @@ def auto_hazard():
             "eta_minutes": eta_minutes,
             "flight_path": {
                 "current": current_coords,
-                "destination": customer_coords,
+                "destination": destination_coords,
+                "mission_phase": mission_phase,
                 "midpoint": {
-                    "lat": round((current_coords["lat"] + customer_coords["lat"]) / 2, 6),
-                    "lng": round((current_coords["lng"] + customer_coords["lng"]) / 2, 6)
+                    "lat": round((current_coords["lat"] + destination_coords["lat"]) / 2, 6),
+                    "lng": round((current_coords["lng"] + destination_coords["lng"]) / 2, 6)
                 }
             }
         },

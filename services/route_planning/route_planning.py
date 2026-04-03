@@ -65,7 +65,7 @@ def plan_route():
 
         total_energy = estimate_energy(total_km, payload_weight)
         energy_available = d_battery
-        eta_minutes = (total_km / DRONE_SPEED_KMH) * 60
+        eta_minutes = (hospital_to_customer_km / DRONE_SPEED_KMH) * 60
 
         if total_energy > energy_available:
             rejected.append({

@@ -442,6 +442,7 @@ def dispatch_update():
     if "mission_phase"   in data: updates["mission_phase"]   = data["mission_phase"]
     if "route_id"        in data: updates["route_id"]        = data["route_id"]
     if "updated_eta"     in data: updates["updated_eta"]     = data["updated_eta"]
+    if "reroute_details" in data: updates["reroute_details"] = data["reroute_details"]
 
     if "dispatch_status" in data:
         updates["status"] = data.get("mission_phase", data["dispatch_status"])
