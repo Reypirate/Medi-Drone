@@ -318,9 +318,11 @@ If no safe alternative route exists (A* returns no viable path), the mission is 
 
 The weather simulation uses grid-based hazard zones to test drone rerouting:
 
-- **Hazard Zone Radius:** 12% of flight distance (min 0.3km, max 1.5km)
+- **Hazard Zone Radius:** 12% of flight distance (min 0.3km, max 1.5km) when using auto-hazard
 - **Grid Resolution:** 0.002 degrees (~220m per grid cell)
 - **A* Pathfinding:** Navigates around hazard zones using 8-directional movement
+- **Hazard Zone Merge:** Multiple grid-based hazards are merged into a single bounding zone for efficient pathfinding
+- **Flight Path Sampling:** System samples 10 points along the flight corridor to detect hazard intersections
 
 ### Testing Rerouting
 
@@ -389,6 +391,7 @@ All API endpoints are accessible via Kong Gateway at `http://localhost:8000/api/
     "radius_km": 1.0
   }
   ```
+  **Note**: Hazard radius is automatically set to 12% of flight distance (min 0.3km, max 1.5km) when using auto-hazard. Multiple grid-based hazard zones are merged into a single bounding zone for A* pathfinding.
 
 ### Inventory
 - `GET /api/inventory/inventory` - List all inventory items
@@ -399,6 +402,27 @@ All API endpoints are accessible via Kong Gateway at `http://localhost:8000/api/
 ### Hospitals
 - `GET /api/hospitals/hospitals` - List all hospitals
 - `GET /api/hospitals/hospital/<id>/location` - Get hospital coordinates
+
+### Geolocation (Direct Service Access - Not through Kong)
+- `GET http://localhost:5007/maps/api/geocode/json?address={address}` - Forward geocoding (address → coordinates)
+- `GET http://localhost:5007/maps/api/reverse-geocode?lat={lat}&lng={lng}` - Reverse geocoding (coordinates → address)
+- `GET http://localhost:5007/geocode/cache/stats` - View cache statistics
+
+### Route Planning
+- `POST /api/route/route/plan` - Initial route planning with drone selection
+- `POST /api/route/route/reroute` - Mid-flight A* rerouting with hazard avoidance
+  ```json
+  {
+    "order_id": "ORD-XXXX",
+    "drone_id": "D-01",
+    "current_coords": {"lat": 1.35, "lng": 103.8},
+    "destination_coords": {"lat": 1.36, "lng": 103.9},
+    "hazard_zone": {"center": {"lat": 1.355, "lng": 103.85}, "radius_km": 0.5},
+    "max_detour_minutes": 10,
+    "mission_phase": "TO_CUSTOMER"
+  }
+  ```
+  **mission_phase**: `TO_CUSTOMER` (full A* pathfinding) or `TO_HOSPITAL` (simplified direct routing)
 
 ### Drones
 - `GET /api/drones/drones` - List all drones
@@ -500,6 +524,23 @@ The system tracks three types of missions in the active missions registry:
    - Removed after 2 polling cycles (~1 minute)
    - Drone status set to AVAILABLE with 100% battery
 
+## Concurrency & Race Condition Prevention
+
+The system uses a **Drone Reservation Lock System** to prevent race conditions where multiple orders could simultaneously assign the same drone:
+
+### Components
+- `drone_reservation_lock`: Threading lock for atomic operations
+- `reserved_drones`: Set of drone_ids reserved but not yet in flight
+- `order_drone_reservations`: Dict mapping order_id → drone_id for cleanup
+
+### Flow
+1. After route planning selects a drone, the system acquires the lock and checks if the drone is already reserved
+2. If available, adds to `reserved_drones` and maps to the order
+3. After drone status updates to IN_FLIGHT, removes from reservation set
+4. On order cancellation, releases the reservation if drone not yet in flight
+
+This ensures no drone can be assigned to multiple orders simultaneously.
+
 ## Beyond-the-Labs (BTL) Components
 
 1. **Kong API Gateway** - Centralized routing, CORS handling, and request proxying for all microservices
@@ -533,7 +574,7 @@ Medi-Drone/
 │   │   └── requirements.txt
 │   ├── inventory/              # Atomic: Stock management
 │   ├── notification/           # Atomic: Twilio SMS via AMQP
-│   ├── hospital_mock/          # Atomic: OutSystems mock
+│   ├── hospital_mock/          # Atomic: Hospital data (Python/Flask mock)
 │   ├── weather/                # Atomic: OpenWeatherMap + simulation
 │   │   └── weather.py          # Proportional hazard radius calculation
 │   ├── geolocation/            # Atomic: Google Maps + cache

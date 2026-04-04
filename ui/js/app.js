@@ -10,6 +10,7 @@ let validatedAddress = null;
 let addressConfirmed = false;
 let currentOrderTab = "active";
 let deletePendingOrderId = null;
+let cancelPendingOrderId = null;
 
 // ── Urgency selector ──────────────────────────────────────────────
 
@@ -428,7 +429,11 @@ function showDeleteDialog(orderId, orderInfo) {
 
 function closeConfirmDialog() {
     deletePendingOrderId = null;
+    cancelPendingOrderId = null;
     deleteAllMode = false;
+    // Reset confirm button text back to "Delete"
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+    if (confirmBtn) confirmBtn.textContent = "Delete";
     document.getElementById("confirm-dialog").classList.add("hidden");
 }
 
@@ -449,6 +454,44 @@ async function confirmDeleteOrder() {
         }
     } catch (e) {
         addLog(`Error deleting order: ${e.message}`, "error");
+    } finally {
+        closeConfirmDialog();
+    }
+}
+
+// ── Cancel order with confirmation ───────────────────────────────────
+
+function showCancelDialog(orderId) {
+    cancelPendingOrderId = orderId;
+    const messageEl = document.getElementById("confirm-message");
+    const confirmBtn = document.getElementById("confirm-delete-btn");
+
+    messageEl.textContent = `Are you sure you want to cancel order ${orderId}? Reserved stock will be released and the drone will return to depot.`;
+    confirmBtn.textContent = "Cancel Order";
+    confirmBtn.onclick = () => confirmCancelOrder();
+    document.getElementById("confirm-dialog").classList.remove("hidden");
+}
+
+async function confirmCancelOrder() {
+    if (!cancelPendingOrderId) return;
+
+    try {
+        const resp = await fetch(`${API_BASE}/api/order/order/${cancelPendingOrderId}/cancel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "USER_REQUEST" })
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            addLog(`Order ${cancelPendingOrderId} cancelled: ${data.message}`, "success");
+            refreshOrders();
+        } else {
+            const data = await resp.json();
+            addLog(`Cancel failed: ${data.error || data.message}`, "error");
+        }
+    } catch (e) {
+        addLog(`Error cancelling order: ${e.message}`, "error");
     } finally {
         closeConfirmDialog();
     }
@@ -536,7 +579,7 @@ async function refreshOrders() {
 
         // For active tab, also filter by status
         if (currentOrderTab === "active") {
-            orders = orders.filter(o => ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "DISPATCHED"].includes(o.status));
+            orders = orders.filter(o => ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "IN_FLIGHT", "REROUTED_IN_FLIGHT", "DISPATCHED"].includes(o.status));
         }
 
         const list = document.getElementById("orders-list");
@@ -562,6 +605,12 @@ async function refreshOrders() {
             const badgeClass = getBadgeClass(o.status);
             const badgeLabel = getBadgeLabel(o.status);
             const missionPhase = o.mission_phase || o.dispatch_status;
+
+            // Cancel button: show for active orders that are cancellable (not already cancelled/delivered/failed)
+            const canCancel = currentOrderTab === "active" &&
+                               !o.status.includes("CANCELLED") &&
+                               o.status !== "DELIVERED" &&
+                               !o.status.includes("FAIL");
 
             // Display ETA countdown for dispatched orders
             let etaDisplay = "";
@@ -596,7 +645,10 @@ async function refreshOrders() {
                     <div class="order-header">
                         <span class="order-id">${o.order_id}</span>
                         <span class="badge ${badgeClass}">${badgeLabel}</span>
-                        ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
+                        <div style="display:flex; gap:6px; margin-left:auto;">
+                            ${canCancel ? `<button class="cancel-btn" onclick="showCancelDialog('${o.order_id}')">Cancel Order</button>` : ""}
+                            ${canDelete ? `<button class="delete-btn" onclick="showDeleteDialog('${o.order_id}')">Delete</button>` : ""}
+                        </div>
                     </div>
                     <div class="order-details">
                         <div>Hospital: <span class="order-detail-value">${o.hospital_name || o.hospital_id || "Auto"}</span></div>
@@ -677,7 +729,7 @@ let hospitalNameCache = null;
 let selectedMissionId = null;
 
 function navigateTo(page) {
-    const pages = ["dashboard", "inventory", "drones", "simulation"];
+    const pages = ["dashboard", "inventory", "drones", "simulation", "livemap"];
     pages.forEach(p => {
         document.getElementById(`page-${p}`).classList.toggle("page-hidden", p !== page);
         document.getElementById(`nav-${p}`).classList.toggle("active", p === page);
@@ -688,6 +740,11 @@ function navigateTo(page) {
     if (page === "simulation") {
         refreshSimulationStatus();
         refreshActiveMissions();
+    }
+    if (page === "livemap") {
+        initLiveMap();
+    } else {
+        stopMapPolling();
     }
 }
 
@@ -783,6 +840,28 @@ async function searchInventory() {
     } catch (e) {
         summaryEl.innerHTML = "";
         resultsEl.innerHTML = `<div class="empty-state">Failed to load inventory: ${e.message}</div>`;
+    }
+}
+
+async function restockInventory() {
+    const btn = document.getElementById("restock-btn");
+    btn.disabled = true;
+    btn.textContent = "Restocking...";
+    try {
+        const resp = await fetch(`${API_BASE}/api/inventory/inventory/restock`, { method: "POST" });
+        const data = await resp.json();
+        if (data.status === "RESTOCKED") {
+            btn.textContent = "Restocked!";
+            searchInventory();
+            setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
+        } else {
+            btn.textContent = "Restock Failed";
+            setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
+        }
+    } catch (e) {
+        console.error("[Restock Error]", e);
+        btn.textContent = "Restock Failed";
+        setTimeout(() => { btn.textContent = "Restock All Hospitals"; btn.disabled = false; }, 2000);
     }
 }
 
@@ -959,6 +1038,9 @@ async function refreshSimulationStatus() {
                 <div style="margin-top:8px; font-size:12px; color:#94a3b8;">Weather service using real API data or dev mode</div>
             `;
         }
+
+        // Also update the simulation mode indicator
+        await checkSimulationStatus();
     } catch (e) {
         document.getElementById("sim-status-content").innerHTML = `
             <div style="color:#f87171;">Failed to fetch simulation status: ${e.message}</div>
@@ -1020,6 +1102,21 @@ async function enableReroutingMode() {
         return;
     }
 
+    // First check if weather service is healthy
+    try {
+        const healthResp = await fetch(`${WEATHER_URL}/api/weather/health`, {
+            method: "GET"
+        });
+        if (!healthResp.ok) {
+            addSimLog(`&#9888; Weather service is not ready. Please wait a moment and try again.`);
+            return;
+        }
+    } catch (e) {
+        addSimLog(`&#9888; Cannot reach weather service. Please check if services are running.`);
+        console.error("Health check failed:", e);
+        return;
+    }
+
     const payload = {
         force_unsafe: false,  // Don't force unsafe, just use hazard zones
         unsafe_reason: [],    // Empty for rerouting mode
@@ -1028,23 +1125,64 @@ async function enableReroutingMode() {
         hazard_zones: hazardZones
     };
 
-    try {
-        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/enable`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-        const data = await resp.json();
+    // Use Kong gateway URL with retry logic
+    const url = `${WEATHER_URL}/api/weather/simulate/enable`;
+    const maxRetries = 2;
+    let success = false;
+    let lastError = null;
 
-        if (resp.ok) {
-            addSimLog(`&#127795; REROUTING MODE ACTIVATED: ${hazardZones.length} hazard zone(s) loaded`);
-            addSimLog(`  Drones will REROUTE around hazard zones using A* pathfinding`);
-            refreshSimulationStatus();
-        } else {
-            addSimLog(`Failed to enable rerouting mode: ${data.message || "Unknown error"}`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const resp = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            // Log response details for debugging
+            const responseText = await resp.text();
+
+            if (resp.ok) {
+                const data = JSON.parse(responseText);
+                addSimLog(`&#127795; REROUTING MODE ACTIVATED: ${hazardZones.length} hazard zone(s) loaded`);
+                addSimLog(`  Drones will REROUTE around hazard zones using A* pathfinding`);
+                refreshSimulationStatus();
+                success = true;
+                break;
+            } else {
+                // Try to parse error message from response
+                let errorMsg = `HTTP ${resp.status}`;
+                try {
+                    const data = JSON.parse(responseText);
+                    errorMsg = data.message || data.error || responseText;
+                } catch {
+                    errorMsg = responseText || `HTTP ${resp.status}`;
+                }
+                lastError = errorMsg;
+                console.error(`Weather enable error (attempt ${attempt}):`, resp.status, responseText);
+
+                // Don't retry on client errors (4xx)
+                if (resp.status >= 400 && resp.status < 500) {
+                    break;
+                }
+                // Wait before retry (only for server errors)
+                if (attempt < maxRetries) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+        } catch (e) {
+            lastError = e.message;
+            console.error(`Weather enable exception (attempt ${attempt}):`, e);
+
+            // Wait before retry
+            if (attempt < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
         }
-    } catch (e) {
-        addSimLog(`Error enabling rerouting mode: ${e.message}`);
+    }
+
+    if (!success && lastError) {
+        addSimLog(`&#9888; Failed to enable rerouting mode: ${lastError}`);
     }
 }
 
@@ -1066,6 +1204,132 @@ async function disableSimulation() {
         addSimLog(`Error disabling simulation: ${e.message}`);
     }
 }
+
+// ── Reset All Drones to Depot ────────────────────────────────────────────
+
+async function resetAllDrones() {
+    const btn = document.getElementById("reset-drones-btn");
+    if (!btn) return;
+
+    // Show confirmation
+    if (!confirm("Are you sure you want to reset all drones to the depot?\n\nThis will:\n• Cancel ALL active missions\n• Reset ALL drones to AVAILABLE status\n• Set all drone positions to central depot\n• Reset all batteries to 100%\n\nThis action cannot be undone.")) {
+        return;
+    }
+
+    // Disable button and show loading state
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Resetting...";
+    btn.style.background = "#64748b";
+
+    try {
+        addSimLog(`&#128168; <strong>EMERGENCY RESET INITIATED</strong>`);
+        addSimLog(`&nbsp;&nbsp;Cancelling all active missions and resetting drones to depot...`);
+
+        // Use API_BASE (Kong gateway) instead of direct DISPATCH_URL for browser compatibility
+        const resp = await fetch(`${API_BASE}/api/dispatch/dispatch/reset-all`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            addSimLog(`&#10003; <strong>RESET COMPLETE</strong>`);
+            addSimLog(`&nbsp;&nbsp;&#128165; Cancelled missions: ${data.cancelled_missions.length}`);
+            addSimLog(`&nbsp;&nbsp;&#9992; Drones reset: ${data.reset_drones.length}`);
+            addSimLog(`&nbsp;&nbsp;&#128205; Depot location: (${data.depot_location.lat.toFixed(4)}, ${data.depot_location.lng.toFixed(4)})`);
+
+            if (data.errors && data.errors.length > 0) {
+                addSimLog(`&nbsp;&nbsp;&#9888; Errors encountered:`);
+                data.errors.forEach(err => addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;• ${err}`));
+            }
+
+            // Refresh UI components
+            refreshSimulationStatus();
+            refreshActiveMissions();
+
+            // Switch to Cancelled tab to show cancelled orders
+            if (currentOrderTab === "active") {
+                setOrderTab("cancelled");
+            } else {
+                refreshOrders();
+            }
+
+            // Refresh drones if on drones page
+            if (document.getElementById("page-drones") && !document.getElementById("page-drones").classList.contains("page-hidden")) {
+                loadDrones();
+            }
+
+            // Refresh live map if on livemap page
+            if (document.getElementById("page-livemap") && !document.getElementById("page-livemap").classList.contains("page-hidden")) {
+                updateLiveMap();
+            }
+
+            // Update active count in header
+            document.getElementById("active-count").textContent = "0 active missions";
+        } else {
+            addSimLog(`&#10060; Reset failed: ${data.error || "Unknown error"}`);
+        }
+    } catch (e) {
+        addSimLog(`&#10060; Error during reset: ${e.message}`);
+    } finally {
+        // Re-enable button
+        btn.disabled = false;
+        btn.textContent = originalText;
+        btn.style.background = "#ef4444";
+    }
+}
+
+// ── Fast-Forward Simulation Mode ─────────────────────────────────────────────
+
+async function toggleFastForward() {
+    const btn = document.getElementById("fastforward-btn");
+    const icon = document.getElementById("ff-icon");
+    const label = document.getElementById("ff-label");
+    const indicator = document.getElementById("ff-indicator");
+
+    try {
+        const newState = !fastForwardMode.enabled;
+
+        const resp = await fetch(`${API_BASE}/api/dispatch/dispatch/fastforward`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                enabled: newState,
+                multiplier: 4.0  // 4x speed
+            })
+        });
+
+        if (resp.ok) {
+            const data = await resp.json();
+            fastForwardMode.enabled = data.enabled;
+            fastForwardMode.multiplier = data.multiplier;
+
+            if (fastForwardMode.enabled) {
+                icon.innerHTML = "&#9193;";
+                label.textContent = `${fastForwardMode.multiplier}x Speed`;
+                indicator.style.display = "inline";
+                btn.style.background = "rgba(34, 197, 94, 0.2)";
+                btn.style.borderColor = "#22c55e";
+
+                // Restart map polling with faster interval
+                startMapPolling();
+            } else {
+                icon.innerHTML = "&#9193;";
+                label.textContent = "Fast-Forward";
+                indicator.style.display = "none";
+                btn.style.background = "rgba(30,41,59,0.9)";
+                btn.style.borderColor = "#475569";
+
+                // Reset to normal polling
+                startMapPolling();
+            }
+        }
+    } catch (e) {
+        console.error("Failed to toggle fast-forward:", e);
+    }
+}
+
 
 // ── Display Reroute Details Helper ──────────────────────────────────────
 
@@ -1275,6 +1539,52 @@ async function triggerWeatherPoll() {
 
 window.hazardZones = [];
 
+// Simulation mode status tracking
+async function checkSimulationStatus() {
+    try {
+        const resp = await fetch(`${WEATHER_URL}/api/weather/simulate/status`, {
+            method: "GET"
+        });
+        const data = await resp.json();
+
+        const indicator = document.getElementById("simulation-status-indicator");
+        const icon = document.getElementById("simulation-status-icon");
+        const text = document.getElementById("simulation-status-text");
+
+        if (indicator) {
+            indicator.style.display = "block";
+
+            if (data.simulation_enabled) {
+                icon.textContent = "&#127881;"; // Green checkmark
+                text.innerHTML = `<span style="color:#22c55e;">Rerouting Mode ACTIVE</span> (${data.config?.hazard_zones?.length || 0} hazard zones loaded)`;
+            } else {
+                icon.textContent = "&#9888;"; // Warning icon
+                text.innerHTML = `<span style="color:#f59e0b;">Rerouting Mode NOT ENABLED</span> - Drones will NOT reroute around hazard zones`;
+            }
+
+            // Show warning if hazard zones exist but simulation mode is disabled
+            if (!data.simulation_enabled && window.hazardZones.length > 0) {
+                indicator.style.background = "#7c2d12";
+                indicator.style.border = "1px solid #f59e0b";
+            } else {
+                indicator.style.background = "#1e293b";
+                indicator.style.border = "none";
+            }
+        }
+
+        return data.simulation_enabled;
+    } catch (e) {
+        console.error("Failed to check simulation status:", e);
+        return false;
+    }
+}
+
+// Check simulation status periodically and when hazard zones are modified
+setInterval(checkSimulationStatus, 10000); // Check every 10 seconds
+
+// Start checking on page load
+setTimeout(checkSimulationStatus, 2000);
+
 function addHazardZone() {
     const lat = parseFloat(document.getElementById("sim-hazard-lat").value);
     const lng = parseFloat(document.getElementById("sim-hazard-lng").value);
@@ -1305,18 +1615,21 @@ function addHazardZone() {
     window.hazardZones.push(zone);
     updateHazardZonesList();
     addSimLog(`Added hazard zone: (${lat.toFixed(4)}, ${lng.toFixed(4)}) - ${radius}km radius`);
+    checkSimulationStatus(); // Update simulation status indicator
 }
 
 function removeHazardZone(id) {
     window.hazardZones = window.hazardZones.filter(z => z.id !== id);
     updateHazardZonesList();
     addSimLog(`Removed hazard zone`);
+    checkSimulationStatus(); // Update simulation status indicator
 }
 
 function clearHazardZones() {
     window.hazardZones = [];
     updateHazardZonesList();
     addSimLog(`Cleared all hazard zones`);
+    checkSimulationStatus(); // Update simulation status indicator
 }
 
 function updateHazardZonesList() {
@@ -1368,6 +1681,73 @@ function addPresetHazard(location) {
 
 // ── Auto-Place Hazard on Active Mission ────────────────────────────────
 
+/**
+ * Calculate the midpoint along a path (waypoints or direct line).
+ * Returns {lat, lng} coordinates of the midpoint.
+ */
+function calculatePathMidpoint(current, destination, waypoints) {
+    // If rerouted with waypoints, calculate midpoint along the waypoint path
+    if (waypoints && waypoints.length >= 2) {
+        // Build the full path from current position through waypoints to destination
+        const fullPath = [current, ...waypoints, destination];
+
+        // Calculate total distance of the path
+        let totalDistance = 0;
+        const segmentDistances = [];
+
+        for (let i = 0; i < fullPath.length - 1; i++) {
+            const dist = haversineDistance(
+                fullPath[i].lat, fullPath[i].lng,
+                fullPath[i + 1].lat, fullPath[i + 1].lng
+            );
+            segmentDistances.push(dist);
+            totalDistance += dist;
+        }
+
+        // Find the segment that contains the midpoint (half of total distance)
+        const targetDistance = totalDistance / 2;
+        let accumulatedDistance = 0;
+
+        for (let i = 0; i < segmentDistances.length; i++) {
+            if (accumulatedDistance + segmentDistances[i] >= targetDistance) {
+                // Midpoint is in this segment
+                const distanceIntoSegment = targetDistance - accumulatedDistance;
+                const fraction = distanceIntoSegment / segmentDistances[i];
+
+                return {
+                    lat: fullPath[i].lat + fraction * (fullPath[i + 1].lat - fullPath[i].lat),
+                    lng: fullPath[i].lng + fraction * (fullPath[i + 1].lng - fullPath[i].lng)
+                };
+            }
+            accumulatedDistance += segmentDistances[i];
+        }
+
+        // Fallback to last point
+        return fullPath[fullPath.length - 1];
+    }
+
+    // Direct path: simple midpoint between current and destination
+    return {
+        lat: (current.lat + destination.lat) / 2,
+        lng: (current.lng + destination.lng) / 2
+    };
+}
+
+/**
+ * Calculate Haversine distance between two points in km.
+ */
+function haversineDistance(lat1, lng1, lat2, lng2) {
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+              Math.cos(lat1 * Math.PI / 180) *
+              Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLng / 2) ** 2;
+    const c = 2 * Math.asin(Math.sqrt(a));
+    return R * c;
+}
+
 async function autoPlaceHazard() {
     const btn = document.getElementById("auto-hazard-btn");
     if (!btn) return;
@@ -1390,45 +1770,60 @@ async function autoPlaceHazard() {
             return;
         }
 
-        // Use selected mission if available, otherwise find first IN_FLIGHT mission
+        // Use selected mission if available, otherwise find first active mission
+        // Accept TO_HOSPITAL, IN_FLIGHT, and REROUTED_IN_FLIGHT statuses
+        const activeStatuses = ["TO_HOSPITAL", "TO_CUSTOMER", "IN_FLIGHT", "REROUTED_IN_FLIGHT"];
         let mission;
         if (selectedMissionId) {
-            mission = missionsData.active_missions.find(m => m.order_id === selectedMissionId);
+            mission = missionsData.active_missions.find(m =>
+                m.order_id === selectedMissionId && activeStatuses.includes(m.dispatch_status)
+            );
             if (!mission) {
-                addSimLog(`&#9888; Selected mission ${selectedMissionId} not found. Using first IN_FLIGHT mission.`);
+                addSimLog(`&#9888; Selected mission ${selectedMissionId} not active. Using first active mission.`);
                 mission = missionsData.active_missions.find(m =>
-                    m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+                    activeStatuses.includes(m.dispatch_status)
                 );
             }
         } else {
             mission = missionsData.active_missions.find(m =>
-                m.dispatch_status === "IN_FLIGHT" || m.dispatch_status === "REROUTED_IN_FLIGHT"
+                activeStatuses.includes(m.dispatch_status)
             );
         }
 
         if (!mission) {
-            addSimLog(`&#9888; No in-flight missions found.`);
+            addSimLog(`&#9888; No active missions found.`);
             return;
         }
 
         const current = mission.current_coords;
-        const customer = mission.customer_coords;
+        const phase = mission.mission_phase || mission.dispatch_status;
+        // Use the correct destination based on mission phase:
+        // TO_HOSPITAL: drone is flying to hospital, so destination is hospital
+        // TO_CUSTOMER/IN_FLIGHT/REROUTED: drone is flying to customer
+        const destination = (phase === "TO_HOSPITAL") ? mission.hospital_coords : mission.customer_coords;
+        const waypoints = mission.waypoints || [];
 
-        // Calculate midpoint
-        const midLat = (current.lat + customer.lat) / 2;
-        const midLng = (current.lng + customer.lng) / 2;
+        // Calculate midpoint along the actual flight path (accounts for rerouting)
+        const midpoint = calculatePathMidpoint(current, destination, waypoints);
+        const midLat = midpoint.lat;
+        const midLng = midpoint.lng;
 
-        // Calculate recommended radius (about 12% of remaining distance)
-        // Using Haversine formula for distance
-        const R = 6371; // Earth's radius in km
-        const dLat = (customer.lat - current.lat) * Math.PI / 180;
-        const dLng = (customer.lng - current.lng) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 +
-                  Math.cos(current.lat * Math.PI / 180) *
-                  Math.cos(customer.lat * Math.PI / 180) *
-                  Math.sin(dLng / 2) ** 2;
-        const c = 2 * Math.asin(Math.sqrt(a));
-        const remainingDistanceKm = R * c;
+        // Calculate remaining distance along actual path
+        let remainingDistanceKm;
+        if (waypoints && waypoints.length >= 2) {
+            // Calculate total path distance through waypoints
+            const fullPath = [current, ...waypoints, destination];
+            remainingDistanceKm = 0;
+            for (let i = 0; i < fullPath.length - 1; i++) {
+                remainingDistanceKm += haversineDistance(
+                    fullPath[i].lat, fullPath[i].lng,
+                    fullPath[i + 1].lat, fullPath[i + 1].lng
+                );
+            }
+        } else {
+            // Direct path distance
+            remainingDistanceKm = haversineDistance(current.lat, current.lng, destination.lat, destination.lng);
+        }
 
         // Recommended radius: 12% of remaining distance, min 0.3km, max 1.5km
         const recommendedRadius = Math.max(0.3, Math.min(1.5, remainingDistanceKm * 0.12));
@@ -1447,9 +1842,13 @@ async function autoPlaceHazard() {
         addSimLog(`&nbsp;&nbsp;&#128205; Order: ${mission.order_id} | Drone: ${mission.drone_id}`);
         addSimLog(`&nbsp;&nbsp;&#129686; Status: ${mission.dispatch_status} | ETA: ${mission.eta_minutes}min`);
         addSimLog(`&nbsp;&nbsp;&#128396; Remaining distance: ${remainingDistanceKm.toFixed(2)}km`);
+        if (waypoints && waypoints.length >= 2) {
+            addSimLog(`&nbsp;&nbsp;&#127916; Rerouted path detected: ${waypoints.length} waypoints`);
+        }
+        addSimLog(`&nbsp;&nbsp;&#128205; Midpoint: (${midLat.toFixed(4)}, ${midLng.toFixed(4)})`);
         addSimLog(`&nbsp;&nbsp;&#10142; <strong>Flight Path:</strong>`);
         addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;From: (${current.lat.toFixed(4)}, ${current.lng.toFixed(4)})`);
-        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;To: (${customer.lat.toFixed(4)}, ${customer.lng.toFixed(4)})`);
+        addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;To: (${destination.lat.toFixed(4)}, ${destination.lng.toFixed(4)}) [${phase === "TO_HOSPITAL" ? "Hospital" : "Customer"}]`);
         addSimLog(`&nbsp;&nbsp;&#128165; <strong>Hazard inputs populated:</strong>`);
         addSimLog(`&nbsp;&nbsp;&nbsp;&nbsp;Lat: ${midLat.toFixed(6)}, Lng: ${midLng.toFixed(6)}, Radius: ${recommendedRadius.toFixed(2)}km (recommended)`);
         addSimLog(`&nbsp;&nbsp;&#9888; <strong>Review above, then click "Add Hazard Zone" to add it</strong>`);
@@ -1505,4 +1904,650 @@ function renderHazardZones(zones) {
 
 function removeHazardZoneByIndex(index) {
     addSimLog(`&#9888; Remove hazard zone functionality not yet implemented for index ${index}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LIVE MAP - Google Maps drone tracking
+// ═══════════════════════════════════════════════════════════════════
+
+let liveMap = null;
+let mapDroneMarkers = {};
+let mapFlightPaths = [];
+let mapHazardCircles = [];
+let mapWeatherCircles = [];
+let mapInfoWindow = null;
+let mapPollTimer = null;
+let mapWeatherCache = {};
+let mapLastWeatherCheck = 0;
+const MAP_POLL_MS = 3000;
+const WEATHER_CHECK_INTERVAL_MS = 15000;
+
+// Fast-forward simulation mode
+let fastForwardMode = { enabled: false, multiplier: 4 };
+
+const DARK_MAP_STYLE = [
+    { elementType: "geometry", stylers: [{ color: "#1d2c4d" }] },
+    { elementType: "labels.text.fill", stylers: [{ color: "#8ec3b9" }] },
+    { elementType: "labels.text.stroke", stylers: [{ color: "#1a3646" }] },
+    { featureType: "administrative.country", elementType: "geometry.stroke", stylers: [{ color: "#4b6878" }] },
+    { featureType: "landscape.man_made", elementType: "geometry.stroke", stylers: [{ color: "#334e87" }] },
+    { featureType: "landscape.natural", elementType: "geometry", stylers: [{ color: "#023e58" }] },
+    { featureType: "poi", elementType: "geometry", stylers: [{ color: "#283d6a" }] },
+    { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#6f9ba5" }] },
+    { featureType: "poi.park", elementType: "geometry.fill", stylers: [{ color: "#023e58" }] },
+    { featureType: "road", elementType: "geometry", stylers: [{ color: "#304a7d" }] },
+    { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#98a5be" }] },
+    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#2c6675" }] },
+    { featureType: "road.highway", elementType: "geometry.stroke", stylers: [{ color: "#255763" }] },
+    { featureType: "transit", elementType: "labels.text.fill", stylers: [{ color: "#98a5be" }] },
+    { featureType: "water", elementType: "geometry.fill", stylers: [{ color: "#0e1626" }] },
+    { featureType: "water", elementType: "labels.text.fill", stylers: [{ color: "#4e6d70" }] },
+];
+
+const DRONE_DEPOT = { lat: 1.3644, lng: 103.8190 };
+
+let _mapInitRetries = 0;
+let _mapInitTimeout = null;
+
+function initLiveMap() {
+    if (!window._googleMapsReady) {
+        _mapInitRetries++;
+        if (_mapInitRetries > 30) {
+            document.getElementById("live-map").innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#f87171;font-size:14px;">Failed to load Google Maps. Check your API key and network connection.</div>';
+            return;
+        }
+        _mapInitTimeout = setTimeout(initLiveMap, 300);
+        return;
+    }
+    _mapInitRetries = 0;
+
+    if (!liveMap) {
+        liveMap = new google.maps.Map(document.getElementById("live-map"), {
+            center: { lat: 1.3521, lng: 103.8198 },
+            zoom: 12,
+            styles: DARK_MAP_STYLE,
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: false,
+            zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
+        });
+        mapInfoWindow = new google.maps.InfoWindow();
+    }
+
+    updateLiveMap();
+    startMapPolling();
+}
+
+function startMapPolling() {
+    stopMapPolling();
+    // Use faster polling when fast-forward is active
+    const pollInterval = fastForwardMode.enabled ? MAP_POLL_MS / fastForwardMode.multiplier : MAP_POLL_MS;
+    mapPollTimer = setInterval(updateLiveMap, Math.max(500, pollInterval)); // Min 500ms
+}
+
+function stopMapPolling() {
+    if (mapPollTimer) {
+        clearInterval(mapPollTimer);
+        mapPollTimer = null;
+    }
+    if (_mapInitTimeout) {
+        clearTimeout(_mapInitTimeout);
+        _mapInitTimeout = null;
+        _mapInitRetries = 0;
+    }
+}
+
+async function updateLiveMap() {
+    if (!liveMap) return;
+
+    try {
+        const [missionsData, dronesResp, weatherStatus] = await Promise.all([
+            fetch(`${DISPATCH_URL}/dispatch/missions`).then(r => r.json()).catch(() => ({ active_missions: [] })),
+            fetch(`${API_BASE}/api/drones/drones`).then(r => r.json()).catch(() => []),
+            fetch(`${WEATHER_URL}/api/weather/simulate/status`).then(r => r.json()).catch(() => ({ simulation_enabled: false })),
+        ]);
+
+        const activeMissions = missionsData.active_missions || [];
+        const allDrones = Array.isArray(dronesResp) ? dronesResp : [];
+        const missionByDrone = {};
+        activeMissions.forEach(m => { missionByDrone[m.drone_id] = m; });
+
+        // Clear flight paths and hazard overlays (rebuilt each frame)
+        clearFlightPaths();
+        clearHazardCircles();
+        clearWeatherCircles();
+
+        // Track which drone markers are still valid
+        const activeDroneIds = new Set();
+
+        // Build drone lookup by id for battery info
+        const droneById = {};
+        allDrones.forEach(d => { droneById[d.drone_id] = d; });
+
+        // Draw active missions
+        for (const mission of activeMissions) {
+            activeDroneIds.add(mission.drone_id);
+            drawMissionOnMap(mission, droneById[mission.drone_id]);
+        }
+
+        // Draw idle drones
+        for (const drone of allDrones) {
+            if (!missionByDrone[drone.drone_id]) {
+                activeDroneIds.add(drone.drone_id);
+                drawIdleDroneOnMap(drone);
+            }
+        }
+
+        // Remove markers for drones no longer present
+        for (const droneId of Object.keys(mapDroneMarkers)) {
+            if (!activeDroneIds.has(droneId)) {
+                mapDroneMarkers[droneId].setMap(null);
+                delete mapDroneMarkers[droneId];
+            }
+        }
+
+        // Draw hazard zones (simulation)
+        if (weatherStatus.simulation_enabled && weatherStatus.config) {
+            const zones = weatherStatus.config.hazard_zones || [];
+            drawSimulatedHazardZones(zones);
+            updateWeatherBadge("simulated", `Simulation ON - ${zones.length} hazard zone${zones.length !== 1 ? "s" : ""}`);
+        } else {
+            // Check real weather at active drone positions
+            await checkRealWeatherForMap(activeMissions);
+        }
+
+        // Update missions panel
+        updateMapMissionsPanel(activeMissions, allDrones, missionByDrone);
+
+    } catch (e) {
+        console.error("[LiveMap] Update error:", e);
+    }
+}
+
+function drawMissionOnMap(mission, droneData) {
+    const droneId = mission.drone_id;
+    const current = mission.current_coords;
+    const hospital = mission.hospital_coords;
+    const customer = mission.customer_coords;
+    const droneStart = mission.drone_start_coords || DRONE_DEPOT;
+    const phase = mission.mission_phase || mission.dispatch_status;
+    const isRerouted = mission.dispatch_status === "REROUTED_IN_FLIGHT";
+
+    // Determine marker color based on phase
+    let markerColor, statusLabel;
+    if (phase === "TO_HOSPITAL") {
+        markerColor = "#f59e0b";
+        statusLabel = "TO HOSPITAL";
+    } else if (isRerouted) {
+        markerColor = "#f97316";
+        statusLabel = "REROUTED";
+    } else {
+        markerColor = "#a855f7";
+        statusLabel = "IN FLIGHT";
+    }
+
+    // Draw flight path lines
+    const waypoints = mission.waypoints;
+    const hasWaypoints = waypoints && waypoints.length >= 2;
+
+    if (phase === "TO_HOSPITAL") {
+        // Path from drone start to hospital (active leg)
+        drawPolyline([droneStart, hospital], markerColor, 3, false);
+        // Path from hospital to customer (future leg, dashed)
+        drawPolyline([hospital, customer], "#3b82f6", 2, true);
+    } else if (hasWaypoints) {
+        // Rerouted path: drone start → hospital (completed, dim)
+        drawPolyline([droneStart, hospital], "#475569", 2, true);
+
+        // Get the reroute start position (where drone was when hazard was detected)
+        const rerouteStart = mission.reroute_start_coords || current;
+
+        // Draw path from hospital to reroute start (actual path traveled before hazard)
+        drawPolyline([hospital, rerouteStart], "#475569", 2, true);
+
+        // Original straight line shown as dim dashed for reference
+        drawPolyline([hospital, customer], "#475569", 1, true);
+
+        // A* rerouted waypoint path (active leg, green to indicate safe route)
+        // This shows from reroute_start_coords to customer via hazard-avoiding waypoints
+        drawPolyline(waypoints, "#22c55e", 3, false);
+    } else {
+        // Standard straight-line path
+        drawPolyline([droneStart, hospital], "#475569", 2, true);
+        drawPolyline([hospital, customer], "#3b82f6", 3, false);
+    }
+
+    // Draw waypoint markers (hospital + customer)
+    drawWaypointDot(hospital, "#f59e0b", "Hospital");
+    drawWaypointDot(customer, "#22c55e", "Destination");
+
+    // Draw/update drone marker at current position
+    updateDroneMarker(droneId, current, markerColor, statusLabel, mission, droneData);
+}
+
+function drawIdleDroneOnMap(drone) {
+    let markerColor, statusLabel;
+    switch (drone.status) {
+        case "OPERATIONAL":
+            markerColor = "#22c55e";
+            statusLabel = "AVAILABLE";
+            break;
+        case "FAULTY":
+            markerColor = "#ef4444";
+            statusLabel = "FAULTY";
+            break;
+        case "LOW_BATTERY":
+            markerColor = "#64748b";
+            statusLabel = "LOW BATTERY";
+            break;
+        case "CHARGING":
+            markerColor = "#64748b";
+            statusLabel = "CHARGING";
+            break;
+        case "RETURNING_TO_DEPOT":
+            markerColor = "#ef4444";
+            statusLabel = "RETURNING";
+            break;
+        default:
+            markerColor = "#64748b";
+            statusLabel = drone.status;
+    }
+
+    const lat = drone.current_lat != null ? drone.current_lat : drone.lat;
+    const lng = drone.current_lng != null ? drone.current_lng : drone.lng;
+    if (lat == null || lng == null) return;
+    updateDroneMarker(drone.drone_id, { lat, lng }, markerColor, statusLabel, null, drone);
+}
+
+function updateDroneMarker(droneId, position, color, statusLabel, mission, droneData) {
+    const pos = { lat: position.lat, lng: position.lng };
+
+    if (mapDroneMarkers[droneId]) {
+        // Update existing marker position smoothly
+        mapDroneMarkers[droneId].setPosition(pos);
+        mapDroneMarkers[droneId].setIcon(createDroneSVGIcon(color));
+        mapDroneMarkers[droneId]._missionData = mission;
+        mapDroneMarkers[droneId]._droneData = droneData;
+        mapDroneMarkers[droneId]._statusLabel = statusLabel;
+        mapDroneMarkers[droneId]._color = color;
+    } else {
+        const marker = new google.maps.Marker({
+            position: pos,
+            map: liveMap,
+            icon: createDroneSVGIcon(color),
+            title: droneId,
+            zIndex: mission ? 100 : 50,
+            optimized: false,
+        });
+
+        marker._missionData = mission;
+        marker._droneData = droneData;
+        marker._statusLabel = statusLabel;
+        marker._color = color;
+
+        marker.addListener("mouseover", () => showDronePopup(marker));
+        marker.addListener("click", () => showDronePopup(marker));
+
+        mapDroneMarkers[droneId] = marker;
+    }
+}
+
+function createDroneSVGIcon(color) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <circle cx="16" cy="16" r="14" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
+        <circle cx="16" cy="16" r="6" fill="${color}"/>
+        <line x1="6" y1="6" x2="12" y2="12" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="26" y1="6" x2="20" y2="12" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="6" y1="26" x2="12" y2="20" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <line x1="26" y1="26" x2="20" y2="20" stroke="${color}" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="6" cy="6" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="26" cy="6" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="6" cy="26" r="2.5" fill="${color}" fill-opacity="0.7"/>
+        <circle cx="26" cy="26" r="2.5" fill="${color}" fill-opacity="0.7"/>
+    </svg>`;
+
+    return {
+        url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+        scaledSize: new google.maps.Size(36, 36),
+        anchor: new google.maps.Point(18, 18),
+    };
+}
+
+function showDronePopup(marker) {
+    const droneId = marker.getTitle();
+    const mission = marker._missionData;
+    const drone = marker._droneData;
+    const statusLabel = marker._statusLabel;
+    const color = marker._color;
+
+    let badgeBg, badgeColor;
+    switch (statusLabel) {
+        case "IN FLIGHT":
+        case "REROUTED":
+            badgeBg = "rgba(168,85,247,0.2)"; badgeColor = "#c084fc"; break;
+        case "TO HOSPITAL":
+            badgeBg = "rgba(245,158,11,0.2)"; badgeColor = "#fbbf24"; break;
+        case "AVAILABLE":
+            badgeBg = "rgba(34,197,94,0.2)"; badgeColor = "#4ade80"; break;
+        case "FAULTY":
+        case "RETURNING":
+            badgeBg = "rgba(239,68,68,0.2)"; badgeColor = "#f87171"; break;
+        default:
+            badgeBg = "rgba(100,116,139,0.2)"; badgeColor = "#94a3b8";
+    }
+
+    let gridRows = "";
+
+    if (mission) {
+        const bat = drone ? drone.battery : "N/A";
+        const batNum = typeof bat === "number" ? bat : 0;
+        const batColor = batNum >= 60 ? "#22c55e" : batNum >= 30 ? "#eab308" : "#ef4444";
+
+        gridRows = `
+            <div class="label">Order ID</div><div class="value">${mission.order_id}</div>
+            <div class="label">Phase</div><div class="value">${mission.mission_phase || mission.dispatch_status}</div>
+            <div class="label">ETA</div><div class="value">${mission.eta_minutes != null ? Math.round(mission.eta_minutes * 10) / 10 + " min" : "N/A"}</div>
+            <div class="label">Battery</div><div class="value">
+                <span class="popup-battery-bar"><span class="popup-battery-fill" style="width:${batNum}%;background:${batColor}"></span></span>${bat}%
+            </div>
+            <div class="label">Position</div><div class="value">${mission.current_coords.lat.toFixed(4)}, ${mission.current_coords.lng.toFixed(4)}</div>
+            <div class="label">Hospital</div><div class="value">${mission.hospital_coords.lat.toFixed(4)}, ${mission.hospital_coords.lng.toFixed(4)}</div>
+            <div class="label">Customer</div><div class="value">${mission.customer_coords.lat.toFixed(4)}, ${mission.customer_coords.lng.toFixed(4)}</div>
+        `;
+
+        if (mission.reroute_details) {
+            const rd = mission.reroute_details;
+            gridRows += `
+                <div class="label" style="color:#fbbf24">Detour</div><div class="value" style="color:#fbbf24">+${Math.round(rd.detour_percentage)}%</div>
+                <div class="label">Waypoints</div><div class="value">${rd.waypoint_count}</div>
+            `;
+        }
+    } else if (drone) {
+        const batNum = drone.battery || 0;
+        const batColor = batNum >= 60 ? "#22c55e" : batNum >= 30 ? "#eab308" : "#ef4444";
+        const droneLat = drone.lat;
+        const droneLng = drone.lng;
+
+        gridRows = `
+            <div class="label">Battery</div><div class="value">
+                <span class="popup-battery-bar"><span class="popup-battery-fill" style="width:${batNum}%;background:${batColor}"></span></span>${batNum}%
+            </div>
+            <div class="label">Position</div><div class="value">${droneLat.toFixed(4)}, ${droneLng.toFixed(4)}</div>
+        `;
+    }
+
+    const html = `
+        <div class="drone-popup">
+            <div class="drone-popup-header">
+                <span class="popup-icon">&#9992;</span>
+                <span class="popup-title">${droneId}</span>
+                <span class="popup-badge" style="background:${badgeBg};color:${badgeColor}">${statusLabel}</span>
+            </div>
+            <div class="drone-popup-grid">${gridRows}</div>
+        </div>
+    `;
+
+    mapInfoWindow.setContent(html);
+    mapInfoWindow.open(liveMap, marker);
+}
+
+function drawPolyline(points, color, weight, dashed) {
+    const path = points.map(p => ({ lat: p.lat, lng: p.lng }));
+    const opts = {
+        path: path,
+        geodesic: true,
+        strokeColor: color,
+        strokeOpacity: dashed ? 0 : 0.9,
+        strokeWeight: weight,
+        map: liveMap,
+    };
+
+    if (dashed) {
+        opts.strokeOpacity = 0;
+        opts.icons = [{
+            icon: { path: "M 0,-1 0,1", strokeOpacity: 0.5, scale: weight },
+            offset: "0",
+            repeat: "12px",
+        }];
+    }
+
+    const line = new google.maps.Polyline(opts);
+    mapFlightPaths.push(line);
+}
+
+function drawWaypointDot(position, color, label) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12">
+        <circle cx="6" cy="6" r="5" fill="${color}" fill-opacity="0.3" stroke="${color}" stroke-width="1.5"/>
+        <circle cx="6" cy="6" r="2" fill="${color}"/>
+    </svg>`;
+
+    const marker = new google.maps.Marker({
+        position: { lat: position.lat, lng: position.lng },
+        map: liveMap,
+        icon: {
+            url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg),
+            scaledSize: new google.maps.Size(14, 14),
+            anchor: new google.maps.Point(7, 7),
+        },
+        title: label,
+        zIndex: 30,
+        clickable: false,
+    });
+    mapFlightPaths.push(marker);
+}
+
+function drawSimulatedHazardZones(zones) {
+    for (const zone of zones) {
+        const circle = new google.maps.Circle({
+            center: { lat: zone.lat, lng: zone.lng },
+            radius: (zone.radius_km || 2.0) * 1000,
+            strokeColor: "#ef4444",
+            strokeOpacity: 0.7,
+            strokeWeight: 2,
+            fillColor: "#ef4444",
+            fillOpacity: 0.12,
+            map: liveMap,
+            zIndex: 20,
+        });
+        mapHazardCircles.push(circle);
+    }
+}
+
+async function checkRealWeatherForMap(activeMissions) {
+    const now = Date.now();
+    if (now - mapLastWeatherCheck < WEATHER_CHECK_INTERVAL_MS) {
+        // Use cached results - redraw cached weather circles
+        redrawCachedWeatherCircles();
+        return;
+    }
+    mapLastWeatherCheck = now;
+
+    // Collect unique points to check
+    const pointsToCheck = [];
+
+    // Check depot weather
+    pointsToCheck.push({ lat: DRONE_DEPOT.lat, lng: DRONE_DEPOT.lng, label: "Depot" });
+
+    // Check active mission positions and destinations
+    for (const mission of activeMissions) {
+        if (mission.current_coords) {
+            pointsToCheck.push({
+                lat: mission.current_coords.lat,
+                lng: mission.current_coords.lng,
+                label: `${mission.drone_id} position`,
+            });
+        }
+        if (mission.customer_coords) {
+            pointsToCheck.push({
+                lat: mission.customer_coords.lat,
+                lng: mission.customer_coords.lng,
+                label: `${mission.drone_id} destination`,
+            });
+        }
+    }
+
+    // Check weather at each point (limit to 6 checks per cycle)
+    const checks = pointsToCheck.slice(0, 6);
+    const newCache = {};
+    let hasUnsafe = false;
+
+    const results = await Promise.all(
+        checks.map(pt =>
+            fetch(`${API_BASE}/api/weather/weather/check?lat=${pt.lat}&lng=${pt.lng}`)
+                .then(r => r.json())
+                .catch(() => ({ status: "SAFE" }))
+        )
+    );
+
+    for (let i = 0; i < checks.length; i++) {
+        const pt = checks[i];
+        const result = results[i];
+        const key = `${pt.lat.toFixed(3)}_${pt.lng.toFixed(3)}`;
+
+        if (result.status === "UNSAFE") {
+            hasUnsafe = true;
+            newCache[key] = {
+                lat: pt.lat,
+                lng: pt.lng,
+                reasons: result.reasons || [],
+                wind: result.wind_speed_kmh || 0,
+            };
+        }
+    }
+
+    mapWeatherCache = newCache;
+
+    if (hasUnsafe) {
+        const reasons = [...new Set(Object.values(newCache).flatMap(c => c.reasons))];
+        updateWeatherBadge("unsafe", `UNSAFE: ${reasons.join(", ")}`);
+    } else {
+        updateWeatherBadge("safe", "Weather Clear");
+    }
+
+    redrawCachedWeatherCircles();
+}
+
+function redrawCachedWeatherCircles() {
+    for (const data of Object.values(mapWeatherCache)) {
+        const circle = new google.maps.Circle({
+            center: { lat: data.lat, lng: data.lng },
+            radius: 2000,
+            strokeColor: "#f59e0b",
+            strokeOpacity: 0.6,
+            strokeWeight: 2,
+            fillColor: "#f59e0b",
+            fillOpacity: 0.1,
+            map: liveMap,
+            zIndex: 15,
+        });
+        mapWeatherCircles.push(circle);
+    }
+}
+
+function updateWeatherBadge(type, text) {
+    const badge = document.getElementById("map-weather-badge");
+    const icon = document.getElementById("map-weather-icon");
+    const label = document.getElementById("map-weather-label");
+
+    badge.classList.remove("safe", "unsafe", "simulated");
+    if (type === "safe") {
+        badge.classList.add("safe");
+        icon.innerHTML = "&#9729;";
+    } else if (type === "unsafe") {
+        badge.classList.add("unsafe");
+        icon.innerHTML = "&#9888;";
+    } else if (type === "simulated") {
+        badge.classList.add("simulated");
+        icon.innerHTML = "&#9889;";
+    }
+
+    label.textContent = text;
+}
+
+function updateMapMissionsPanel(missions, allDrones, missionByDrone) {
+    const countEl = document.getElementById("map-mission-count");
+    const listEl = document.getElementById("map-missions-list");
+    countEl.textContent = missions.length;
+
+    if (missions.length === 0) {
+        listEl.innerHTML = '<div style="font-size:11px; color:#64748b; padding:8px 0;">No active missions</div>';
+        return;
+    }
+
+    listEl.innerHTML = missions.map(m => {
+        const phase = m.mission_phase || m.dispatch_status;
+        const eta = m.eta_minutes != null ? Math.round(m.eta_minutes * 10) / 10 : "?";
+        const isRerouted = m.dispatch_status === "REROUTED_IN_FLIGHT";
+        const isSelected = selectedMissionId === m.order_id;
+
+        return `
+            <div class="map-mission-item" id="map-mission-${m.order_id}"
+                 onclick="focusMapOnMission('${m.order_id}')"
+                 style="${isSelected ? 'background:rgba(59,130,246,0.15); border-color:#3b82f6;' : ''}">
+                <div class="mission-label">${m.drone_id} &rarr; ${m.order_id}</div>
+                <div class="mission-detail">
+                    ${phase}${isRerouted ? " (rerouted)" : ""} &bull; ETA ${eta} min
+                    ${isSelected ? '<span style="color:#3b82f6; font-size:10px;"> &bull; Selected</span>' : ''}
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
+function updateMapMissionSelection(orderId) {
+    // Remove selection styling from all mission items
+    document.querySelectorAll('.map-mission-item').forEach(el => {
+        el.style.background = '';
+        el.style.borderColor = '';
+        // Remove "Selected" text
+        const detailEl = el.querySelector('.mission-detail');
+        if (detailEl) {
+            detailEl.innerHTML = detailEl.innerHTML.replace(' <span style="color:#3b82f6; font-size:10px;"> &bull; Selected</span>', '');
+        }
+    });
+
+    // Add selection styling to the selected mission
+    const selectedItem = document.getElementById(`map-mission-${orderId}`);
+    if (selectedItem) {
+        selectedItem.style.background = 'rgba(59,130,246,0.15)';
+        selectedItem.style.borderColor = '#3b82f6';
+        // Add "Selected" text
+        const detailEl = selectedItem.querySelector('.mission-detail');
+        if (detailEl && !detailEl.innerHTML.includes('Selected')) {
+            detailEl.innerHTML += ' <span style="color:#3b82f6; font-size:10px;"> &bull; Selected</span>';
+        }
+    }
+}
+
+function focusMapOnMission(orderId) {
+    // Update the global selectedMissionId so hazard placement uses this mission
+    selectedMissionId = orderId;
+
+    // Find the drone marker for this mission
+    for (const [droneId, marker] of Object.entries(mapDroneMarkers)) {
+        if (marker._missionData && marker._missionData.order_id === orderId) {
+            liveMap.panTo(marker.getPosition());
+            liveMap.setZoom(14);
+            showDronePopup(marker);
+            break;
+        }
+    }
+
+    // Update visual selection in the missions panel
+    updateMapMissionSelection(orderId);
+}
+
+function clearFlightPaths() {
+    mapFlightPaths.forEach(obj => obj.setMap(null));
+    mapFlightPaths = [];
+}
+
+function clearHazardCircles() {
+    mapHazardCircles.forEach(c => c.setMap(null));
+    mapHazardCircles = [];
+}
+
+function clearWeatherCircles() {
+    mapWeatherCircles.forEach(c => c.setMap(null));
+    mapWeatherCircles = [];
 }

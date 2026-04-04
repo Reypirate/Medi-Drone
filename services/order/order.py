@@ -21,6 +21,7 @@ init_flask_request_tracking(app)
 
 INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://inventory:5003")
 HOSPITAL_URL  = os.environ.get("HOSPITAL_URL",  "http://hospital:5005")
+DISPATCH_URL  = os.environ.get("DISPATCH_URL",  "http://drone-dispatch:5002")
 
 amqp_channel    = None
 amqp_connection = None
@@ -142,7 +143,7 @@ def db_list_orders(status_filter: str | None = None) -> list[dict]:
         if status_filter == "active":
             cursor.execute("""
                 SELECT * FROM orders
-                WHERE status IN ('CONFIRMED','TO_HOSPITAL','TO_CUSTOMER','IN_TRANSIT','DISPATCHED')
+                WHERE status IN ('CONFIRMED','TO_HOSPITAL','TO_CUSTOMER','IN_TRANSIT','IN_FLIGHT','REROUTED_IN_FLIGHT','DISPATCHED')
                 ORDER BY created_at DESC
             """)
         elif status_filter == "cancelled":
@@ -377,6 +378,18 @@ def cancel_order(order_id):
     if not order:
         return jsonify({"error": "Order not found", "order_id": order_id}), 404
 
+    # Notify drone-dispatch to abort the mission if one exists
+    try:
+        http_requests.post(
+            f"{os.environ.get('DISPATCH_URL', 'http://drone-dispatch:5002')}/dispatch/missions/{order_id}/abort",
+            json={"reason": reason},
+            timeout=10,
+        )
+        print(f"  [ORDER] Notified drone-dispatch to abort mission {order_id}")
+    except Exception as e:
+        # Non-blocking - mission may not exist or service unavailable
+        print(f"  [ORDER] Warning: could not notify drone-dispatch to abort mission {order_id}: {e}")
+
     released = False
     try:
         http_requests.post(
@@ -442,6 +455,7 @@ def dispatch_update():
     if "mission_phase"   in data: updates["mission_phase"]   = data["mission_phase"]
     if "route_id"        in data: updates["route_id"]        = data["route_id"]
     if "updated_eta"     in data: updates["updated_eta"]     = data["updated_eta"]
+    if "reroute_details" in data: updates["reroute_details"] = data["reroute_details"]
 
     if "dispatch_status" in data:
         updates["status"] = data.get("mission_phase", data["dispatch_status"])

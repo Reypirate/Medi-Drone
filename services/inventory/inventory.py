@@ -192,6 +192,57 @@ def search():
         conn.close()
 
 
+@app.route("/inventory/restock", methods=["POST"])
+def restock():
+    """Reset all inventory to original seed quantities across all hospitals."""
+    seed_data = [
+        ("HOSP-001", "BLOOD-O-NEG", "O-Negative Blood Bags", 50),
+        ("HOSP-001", "BLOOD-A-POS", "A-Positive Blood Bags", 30),
+        ("HOSP-001", "BLOOD-B-POS", "B-Positive Blood Bags", 15),
+        ("HOSP-001", "DEFIB-01", "Portable Defibrillator", 8),
+        ("HOSP-001", "ORGAN-KIT-01", "Organ Transport Kit", 5),
+        ("HOSP-001", "EPINEPHRINE-01", "Epinephrine Auto-Injector", 20),
+        ("HOSP-002", "BLOOD-O-NEG", "O-Negative Blood Bags", 20),
+        ("HOSP-002", "BLOOD-B-POS", "B-Positive Blood Bags", 25),
+        ("HOSP-002", "DEFIB-01", "Portable Defibrillator", 6),
+        ("HOSP-002", "EPINEPHRINE-01", "Epinephrine Auto-Injector", 40),
+        ("HOSP-003", "BLOOD-O-NEG", "O-Negative Blood Bags", 35),
+        ("HOSP-003", "BLOOD-A-POS", "A-Positive Blood Bags", 20),
+        ("HOSP-003", "DEFIB-01", "Portable Defibrillator", 10),
+        ("HOSP-003", "ORGAN-KIT-01", "Organ Transport Kit", 3),
+        ("HOSP-003", "EPINEPHRINE-01", "Epinephrine Auto-Injector", 25),
+        ("HOSP-004", "BLOOD-O-NEG", "O-Negative Blood Bags", 15),
+        ("HOSP-004", "BLOOD-A-POS", "A-Positive Blood Bags", 10),
+        ("HOSP-004", "ORGAN-KIT-01", "Organ Transport Kit", 8),
+        ("HOSP-004", "DEFIB-01", "Portable Defibrillator", 4),
+        ("HOSP-004", "EPINEPHRINE-01", "Epinephrine Auto-Injector", 15),
+        ("HOSP-005", "BLOOD-O-NEG", "O-Negative Blood Bags", 25),
+        ("HOSP-005", "BLOOD-A-POS", "A-Positive Blood Bags", 15),
+        ("HOSP-005", "BLOOD-B-POS", "B-Positive Blood Bags", 10),
+        ("HOSP-005", "DEFIB-01", "Portable Defibrillator", 5),
+        ("HOSP-005", "EPINEPHRINE-01", "Epinephrine Auto-Injector", 45),
+    ]
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        for hospital_id, item_id, name, quantity in seed_data:
+            cursor.execute(
+                "INSERT INTO inventory (hospital_id, item_id, name, quantity) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE quantity = %s",
+                (hospital_id, item_id, name, quantity, quantity),
+            )
+        conn.commit()
+        return jsonify({"status": "RESTOCKED", "items_reset": len(seed_data)})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route("/health", methods=["GET"])
 def health():
     try:

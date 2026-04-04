@@ -70,7 +70,7 @@ def get_available():
         excluded = []
 
         # Statuses that are NOT available for dispatch
-        unavailable_statuses = {"IN_FLIGHT", "CHARGING", "RETURNING_TO_DEPOT", "LOW_BATTERY", "FAULTY"}
+        unavailable_statuses = {"IN_FLIGHT", "TO_HOSPITAL", "TO_CUSTOMER", "CHARGING", "RETURNING_TO_DEPOT", "LOW_BATTERY", "FAULTY"}
 
         for d in all_drones:
             if d["status"] not in unavailable_statuses and d["battery"] >= min_battery:

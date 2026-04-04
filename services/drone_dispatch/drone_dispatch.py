@@ -63,12 +63,80 @@ drone_reservation_lock = threading.Lock()
 reserved_drones = set()  # Track drones that have been reserved but not yet in flight
 order_drone_reservations = {}  # Map order_id -> drone_id for cleanup before active_missions is populated
 
+# Fast-forward simulation mode
+fast_forward_mode = {"enabled": False, "multiplier": 4.0}  # 4x speed by default
+
 
 def haversine(lat1, lng1, lat2, lng2):
     lat1, lng1, lat2, lng2 = map(math.radians, [lat1, lng1, lat2, lng2])
     dlat, dlng = lat2 - lat1, lng2 - lng1
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
     return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+
+
+def distance_to_hazard_edge(current_coords, hazard_zone):
+    """
+    Calculate distance from current position to the edge of a hazard zone.
+    Returns distance in km. Negative value means inside the hazard zone.
+    """
+    if not hazard_zone or not hazard_zone.get("center"):
+        return float('inf')  # No hazard zone or invalid data
+
+    center = hazard_zone["center"]
+    radius_km = hazard_zone.get("radius_km", 0)
+
+    # Distance from current position to hazard center
+    distance_to_center = haversine(
+        current_coords.get("lat", 0),
+        current_coords.get("lng", 0),
+        center.get("lat", 0),
+        center.get("lng", 0)
+    )
+
+    # Distance to edge = distance to center - radius
+    distance_to_edge = distance_to_center - radius_km
+
+    return distance_to_edge
+
+
+def interpolate_along_waypoints(waypoints, progress_fraction):
+    """
+    Interpolate position along a waypoint path based on progress fraction (0.0 to 1.0).
+    Distributes progress proportionally across segment distances.
+    """
+    if not waypoints or len(waypoints) < 2:
+        return None
+
+    # Calculate cumulative distances along the path
+    segment_distances = []
+    for i in range(len(waypoints) - 1):
+        d = haversine(
+            waypoints[i]["lat"], waypoints[i]["lng"],
+            waypoints[i + 1]["lat"], waypoints[i + 1]["lng"]
+        )
+        segment_distances.append(d)
+
+    total_distance = sum(segment_distances)
+    if total_distance == 0:
+        return waypoints[0]
+
+    # Find which segment the drone is on
+    target_distance = progress_fraction * total_distance
+    cumulative = 0.0
+
+    for i, seg_dist in enumerate(segment_distances):
+        if cumulative + seg_dist >= target_distance or i == len(segment_distances) - 1:
+            # Drone is on this segment
+            if seg_dist == 0:
+                return waypoints[i]
+            segment_progress = (target_distance - cumulative) / seg_dist
+            segment_progress = max(0.0, min(1.0, segment_progress))
+            lat = waypoints[i]["lat"] + segment_progress * (waypoints[i + 1]["lat"] - waypoints[i]["lat"])
+            lng = waypoints[i]["lng"] + segment_progress * (waypoints[i + 1]["lng"] - waypoints[i]["lng"])
+            return {"lat": lat, "lng": lng}
+        cumulative += seg_dist
+
+    return waypoints[-1]
 
 
 def get_depot_location():
@@ -235,11 +303,13 @@ def dispatch_order(order_data):
         order_drone_reservations[order_id] = selected_drone
         print(f"  [DISPATCH] Reserved drone {selected_drone} for order {order_id}")
 
-    # Get drone start coordinates for phase 1 (needed for ETA calculation and confirm call)
+    # Get drone start coordinates and battery for phase 1 (needed for ETA calculation and confirm call)
     drone_start_coords = None
+    drone_battery = 100  # Default battery
     for d in available_drones:
         if d["drone_id"] == selected_drone:
             drone_start_coords = {"lat": d["coords"]["lat"], "lng": d["coords"]["lng"]}
+            drone_battery = d.get("battery_pct", 100)
             break
 
     if not drone_start_coords:
@@ -304,6 +374,8 @@ def dispatch_order(order_data):
         "payload_weight": payload_weight,
         "hospital_eta_minutes": hospital_eta,  # ETA to reach hospital
         "customer_eta_minutes": eta_minutes,  # ETA from hospital to customer
+        "initial_battery": drone_battery,  # Track initial battery for consumption calculation
+        "current_battery": drone_battery,  # Track current battery as drone travels
     }
 
     # Drone is now in active_missions, so remove from reservation tracking
@@ -563,9 +635,11 @@ def poll_active_missions():
                         print(f"  [HOSPITAL] Warning: could not update drone status: {e}")
                     continue
 
-                # Countdown to hospital
+                # Countdown to hospital (scaled by fast-forward multiplier)
+                ff_multiplier = fast_forward_mode.get("multiplier", 1.0) if fast_forward_mode["enabled"] else 1.0
                 old_eta = mission.get("eta_minutes", 0)
-                mission["eta_minutes"] = max(0, old_eta - (POLL_INTERVAL_SECONDS / 60))
+                mission["eta_minutes"] = max(0, old_eta - (POLL_INTERVAL_SECONDS * ff_multiplier / 60))
+                time_elapsed = POLL_INTERVAL_SECONDS * ff_multiplier / 60
                 print(f"  [TO_HOSPITAL] {order_id}: ETA to hospital {old_eta:.1f} → {mission['eta_minutes']:.1f} min")
 
                 # Update drone position (drone → hospital)
@@ -574,17 +648,40 @@ def poll_active_missions():
                 progress = 1 - (mission["eta_minutes"] / max(mission.get("hospital_eta_minutes", mission["eta_minutes"] + 1), 1))
                 new_lat = drone_start["lat"] + progress * (hospital["lat"] - drone_start["lat"])
                 new_lng = drone_start["lng"] + progress * (hospital["lng"] - drone_start["lng"])
+
+                # Store old position to calculate distance traveled
+                old_coords = mission.get("current_coords", {})
                 mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
 
-                # Update position in drone management
+                # Calculate distance traveled and battery consumption
+                if old_coords:
+                    distance_traveled_km = haversine(
+                        old_coords.get("lat", new_lat),
+                        old_coords.get("lng", new_lng),
+                        new_lat,
+                        new_lng
+                    )
+                    battery_consumed = calculate_battery_consumption(distance_traveled_km)
+                    mission["current_battery"] = max(0, mission.get("current_battery", 100) - battery_consumed)
+                else:
+                    distance_traveled_km = 0
+                    battery_consumed = 0
+
+                # Update position and battery in drone management
                 try:
                     http_requests.patch(
-                        f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/position",
-                        json={"lat": new_lat, "lng": new_lng},
+                        f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                        json={
+                            "lat": new_lat,
+                            "lng": new_lng,
+                            "battery": mission.get("current_battery", 100)
+                        },
                         timeout=10,
                     )
+                    if old_coords and battery_consumed > 0:
+                        print(f"  [TO_HOSPITAL] {order_id}: Traveled {distance_traveled_km:.2f}km, consumed {battery_consumed:.1f}% battery, remaining: {mission.get('current_battery', 100):.1f}%")
                 except Exception as e:
-                    print(f"  [TO_HOSPITAL] Warning: could not update drone position: {e}")
+                    print(f"  [TO_HOSPITAL] Warning: could not update drone position/battery: {e}")
 
                 # Update order service with current ETA during TO_HOSPITAL phase
                 try:
@@ -602,72 +699,169 @@ def poll_active_missions():
                 except Exception as e:
                     print(f"  [TO_HOSPITAL] Warning: could not update order service ETA: {e}")
 
-                # Skip weather check during TO_HOSPITAL phase (no hazard concern)
-                continue
+                # Continue to weather check below
 
             # Phase 2: Drone flying from hospital to customer (delivering supplies)
-            if mission_phase == "TO_CUSTOMER" or mission["dispatch_status"] == "TO_CUSTOMER":
+            elif mission_phase == "TO_CUSTOMER" or mission["dispatch_status"] == "TO_CUSTOMER":
                 # For backward compatibility with existing IN_FLIGHT status
                 mission["dispatch_status"] = "IN_FLIGHT"
 
-            # Simulate drone movement and battery consumption
-            current_eta = mission.get("eta_minutes", 0)
-            if current_eta <= 0:
-                # Delivery complete!
-                print(f"  [DELIVERY] ETA reached zero for {order_id}. Completing delivery...")
-                handle_delivery_completion(order_id, mission)
-                continue
+            # TO_CUSTOMER/IN_FLIGHT movement simulation (skip for TO_HOSPITAL - handled above)
+            if mission_phase != "TO_HOSPITAL" and mission.get("dispatch_status") != "TO_HOSPITAL":
+                # Simulate drone movement and battery consumption
+                current_eta = mission.get("eta_minutes", 0)
+                if current_eta <= 0:
+                    # Check if this was a rerouted TO_HOSPITAL mission that just arrived at hospital
+                    if mission.get("reroute_original_phase") == "TO_HOSPITAL":
+                        # Drone arrived at hospital via rerouted path - transition to TO_CUSTOMER
+                        print(f"  [HOSPITAL] {order_id}: Drone {mission['drone_id']} arrived at hospital (via reroute). Picking up supplies...")
+                        mission["mission_phase"] = "TO_CUSTOMER"
+                        mission["dispatch_status"] = "TO_CUSTOMER"
+                        mission["current_coords"] = mission["hospital_coords"].copy()
+                        mission["eta_minutes"] = mission.get("customer_eta_minutes", 0)
+                        mission["initial_eta"] = mission.get("customer_eta_minutes", 0)
+                        # Clear reroute state for the new leg
+                        mission.pop("reroute_original_phase", None)
+                        mission.pop("waypoints", None)
+                        mission.pop("waypoint_initial_eta", None)
+                        mission.pop("reroute_start_coords", None)
+                        mission.pop("reroute_details", None)
+                        mission.pop("route_id", None)
 
-            # Decrease ETA by poll interval (30 seconds = 0.5 minutes)
-            old_eta = current_eta
-            mission["eta_minutes"] = max(0, current_eta - (POLL_INTERVAL_SECONDS / 60))
-            print(f"  [POLL] {order_id}: ETA {old_eta:.1f} → {mission['eta_minutes']:.1f} min (decremented by {POLL_INTERVAL_SECONDS/60:.1f} min)")
+                        try:
+                            http_requests.post(
+                                f"{ORDER_URL}/dispatch/update",
+                                json={
+                                    "order_id": order_id,
+                                    "drone_id": mission["drone_id"],
+                                    "dispatch_status": "TO_CUSTOMER",
+                                    "mission_phase": "TO_CUSTOMER",
+                                    "eta_minutes": mission["eta_minutes"],
+                                },
+                                timeout=10,
+                            )
+                        except Exception as e:
+                            print(f"  [HOSPITAL] Warning: could not update order service phase: {e}")
 
-            # Update order service with current ETA
-            try:
-                http_requests.post(
-                    f"{ORDER_URL}/dispatch/update",
-                    json={
-                        "order_id": order_id,
-                        "drone_id": mission["drone_id"],
-                        "dispatch_status": mission["dispatch_status"],
-                        "mission_phase": mission.get("mission_phase", mission["dispatch_status"]),
-                        "eta_minutes": mission["eta_minutes"],
-                    },
-                    timeout=10,
-                )
-            except Exception as e:
-                print(f"  [POLL] Warning: could not update order service ETA: {e}")
+                        try:
+                            http_requests.patch(
+                                f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                                json={
+                                    "status": "TO_CUSTOMER",
+                                    "lat": mission["hospital_coords"]["lat"],
+                                    "lng": mission["hospital_coords"]["lng"],
+                                    "current_lat": mission["hospital_coords"]["lat"],
+                                    "current_lng": mission["hospital_coords"]["lng"],
+                                    "target_lat": mission["customer_coords"]["lat"],
+                                    "target_lng": mission["customer_coords"]["lng"],
+                                },
+                                timeout=10,
+                            )
+                        except Exception as e:
+                            print(f"  [HOSPITAL] Warning: could not update drone status: {e}")
+                        continue
 
-            # Update drone position (simulate movement towards destination)
-            if "current_coords" in mission and "customer_coords" in mission:
-                progress_fraction = 1 - (mission["eta_minutes"] / max(mission.get("initial_eta", mission["eta_minutes"] + 1), 1))
-                new_lat = mission["hospital_coords"]["lat"] + progress_fraction * (
-                    mission["customer_coords"]["lat"] - mission["hospital_coords"]["lat"]
-                )
-                new_lng = mission["hospital_coords"]["lng"] + progress_fraction * (
-                    mission["customer_coords"]["lng"] - mission["hospital_coords"]["lng"]
-                )
-                mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
+                    # Delivery complete!
+                    print(f"  [DELIVERY] ETA reached zero for {order_id}. Completing delivery...")
+                    handle_delivery_completion(order_id, mission)
+                    continue
 
-                # Update position in drone management
+                # Decrease ETA by poll interval (scaled by fast-forward multiplier)
+                ff_multiplier = fast_forward_mode.get("multiplier", 1.0) if fast_forward_mode["enabled"] else 1.0
+                old_eta = current_eta
+                mission["eta_minutes"] = max(0, current_eta - (POLL_INTERVAL_SECONDS * ff_multiplier / 60))
+                time_elapsed = POLL_INTERVAL_SECONDS * ff_multiplier / 60
+                print(f"  [POLL] {order_id}: ETA {old_eta:.1f} → {mission['eta_minutes']:.1f} min (decremented by {time_elapsed:.1f} min)" +
+                      (f" [FF {ff_multiplier}x]" if fast_forward_mode["enabled"] else ""))
+
+                # Update order service with current ETA
                 try:
-                    http_requests.patch(
-                        f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/position",
-                        json={"lat": new_lat, "lng": new_lng},
+                    http_requests.post(
+                        f"{ORDER_URL}/dispatch/update",
+                        json={
+                            "order_id": order_id,
+                            "drone_id": mission["drone_id"],
+                            "dispatch_status": mission["dispatch_status"],
+                            "mission_phase": mission.get("mission_phase", mission["dispatch_status"]),
+                            "eta_minutes": mission["eta_minutes"],
+                        },
                         timeout=10,
                     )
                 except Exception as e:
-                    print(f"  [POLL] Warning: could not update drone position: {e}")
+                    print(f"  [POLL] Warning: could not update order service ETA: {e}")
+
+                # Update drone position (simulate movement towards destination)
+                if "current_coords" in mission and "customer_coords" in mission:
+                    waypoints = mission.get("waypoints")
+                    if waypoints and len(waypoints) >= 2:
+                        # Rerouted: progress is based only on the waypoint leg's own ETA
+                        # waypoint_initial_eta = the ETA returned by A* at reroute time
+                        wp_initial = mission.get("waypoint_initial_eta", mission.get("initial_eta", 1))
+                        wp_progress = 1 - (mission["eta_minutes"] / max(wp_initial, 0.1))
+                        wp_progress = max(0.0, min(1.0, wp_progress))
+
+                        new_pos = interpolate_along_waypoints(waypoints, wp_progress)
+                        if new_pos:
+                            new_lat = new_pos["lat"]
+                            new_lng = new_pos["lng"]
+                        else:
+                            new_lat = mission["current_coords"]["lat"]
+                            new_lng = mission["current_coords"]["lng"]
+                    else:
+                        # Standard straight-line interpolation (hospital → customer)
+                        progress_fraction = 1 - (mission["eta_minutes"] / max(mission.get("initial_eta", mission["eta_minutes"] + 1), 1))
+                        progress_fraction = max(0.0, min(1.0, progress_fraction))
+                        new_lat = mission["hospital_coords"]["lat"] + progress_fraction * (
+                            mission["customer_coords"]["lat"] - mission["hospital_coords"]["lat"]
+                        )
+                        new_lng = mission["hospital_coords"]["lng"] + progress_fraction * (
+                            mission["customer_coords"]["lng"] - mission["hospital_coords"]["lng"]
+                        )
+
+                    # Store old position to calculate distance traveled
+                    old_coords = mission.get("current_coords", {})
+                    mission["current_coords"] = {"lat": new_lat, "lng": new_lng}
+
+                    # Calculate distance traveled and battery consumption
+                    if old_coords:
+                        distance_traveled_km = haversine(
+                            old_coords.get("lat", new_lat),
+                            old_coords.get("lng", new_lng),
+                            new_lat,
+                            new_lng
+                        )
+                        battery_consumed = calculate_battery_consumption(distance_traveled_km)
+                        mission["current_battery"] = max(0, mission.get("current_battery", 100) - battery_consumed)
+                    else:
+                        distance_traveled_km = 0
+                        battery_consumed = 0
+
+                    # Update position and battery in drone management
+                    try:
+                        http_requests.patch(
+                            f"{DRONE_MGMT_URL}/drones/{mission['drone_id']}/status",
+                            json={
+                                "lat": new_lat,
+                                "lng": new_lng,
+                                "battery": mission.get("current_battery", 100)
+                            },
+                            timeout=10,
+                        )
+                        if old_coords and battery_consumed > 0:
+                            print(f"  [POLL] {order_id}: Traveled {distance_traveled_km:.2f}km, consumed {battery_consumed:.1f}% battery, remaining: {mission.get('current_battery', 100):.1f}%")
+                    except Exception as e:
+                        print(f"  [POLL] Warning: could not update drone position/battery: {e}")
 
             print(f"  [POLL] Checking weather for mission {order_id} (phase: {mission.get('mission_phase', 'UNKNOWN')}, drone {mission['drone_id']}, ETA: {mission['eta_minutes']:.1f}min)")
 
             # Determine destination based on mission phase
+            # For rerouted missions, use reroute_original_phase to keep heading to the correct destination
             mission_phase = mission.get("mission_phase", mission["dispatch_status"])
-            if mission_phase == "TO_HOSPITAL":
+            original_phase = mission.get("reroute_original_phase")
+            if mission_phase == "TO_HOSPITAL" or original_phase == "TO_HOSPITAL":
                 destination_coords = mission["hospital_coords"]
                 destination_name = "hospital"
-            elif mission_phase == "TO_CUSTOMER" or mission_phase == "IN_FLIGHT" or mission_phase == "REROUTED_IN_FLIGHT":
+            elif mission_phase in ("TO_CUSTOMER", "IN_FLIGHT", "REROUTED_IN_FLIGHT"):
                 destination_coords = mission["customer_coords"]
                 destination_name = "customer"
             else:
@@ -694,6 +888,17 @@ def poll_active_missions():
 
             print(f"  [POLL] UNSAFE weather detected for {order_id} (phase: {mission_phase}): {weather_data.get('reason')}")
             hazard_zone = weather_data.get("hazard_zone", {})
+
+            # PROXIMITY CHECK: Only reroute if drone is within 1km of hazard zone edge
+            distance_to_edge = distance_to_hazard_edge(mission["current_coords"], hazard_zone)
+            PROXIMITY_THRESHOLD_KM = 1.0  # Reroute only when within 1km of hazard edge
+
+            if distance_to_edge > PROXIMITY_THRESHOLD_KM:
+                print(f"  [PROXIMITY] {order_id}: Drone is {distance_to_edge:.2f}km from hazard edge (> {PROXIMITY_THRESHOLD_KM}km threshold)")
+                print(f"  [PROXIMITY] {order_id}: Continuing on intended path until closer to hazard")
+                continue  # Don't reroute yet - continue following intended path
+
+            print(f"  [PROXIMITY] {order_id}: Drone is {distance_to_edge:.2f}km from hazard edge - TRIGGERING REROUTE")
 
             # Scenario 3.1/3.2: Attempt reroute
             try:
@@ -740,11 +945,21 @@ def poll_active_missions():
                 print(f"  [REROUTE] Route summary: {route_summary}")
                 print(f"  [REROUTE] New ETA: {new_eta_minutes:.1f} minutes")
 
-                # Store comprehensive reroute details in mission object
+                # Store comprehensive reroute details and waypoints in mission object
+                # Preserve original phase so we know where the drone was heading before reroute
+                # Only set on first reroute — subsequent reroutes must NOT overwrite the original phase
+                if "reroute_original_phase" not in mission:
+                    mission["reroute_original_phase"] = mission_phase  # e.g. "TO_HOSPITAL" or "TO_CUSTOMER"
                 mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
+                mission["mission_phase"] = "REROUTED_IN_FLIGHT"  # Update mission phase to reflect rerouting
                 mission["route_id"] = reroute_data.get("route_id")
                 mission["updated_eta"] = reroute_data.get("updated_eta")
-                # Store comprehensive reroute details in mission object
+                # Store A* waypoints for position interpolation along rerouted path
+                mission["waypoints"] = reroute_data.get("waypoints", [])
+                # The ETA for the waypoint leg alone (used as denominator for waypoint progress)
+                mission["waypoint_initial_eta"] = new_eta_minutes
+                # Snapshot the drone's position at reroute time as the waypoint path origin
+                mission["reroute_start_coords"] = mission["current_coords"].copy()
                 mission["reroute_details"] = {
                     "original_distance_km": original_distance_km,
                     "new_distance_km": new_distance_km,
@@ -781,12 +996,19 @@ def poll_active_missions():
                             "order_id": order_id,
                             "drone_id": mission["drone_id"],
                             "dispatch_status": "REROUTED_IN_FLIGHT",
-                            "mission_phase": mission.get("mission_phase", "TO_CUSTOMER"),  # Preserve current phase
+                            "mission_phase": "REROUTED_IN_FLIGHT",  # Update to rerouted phase
                             "route_id": reroute_data.get("route_id"),
                             "updated_eta": reroute_data.get("updated_eta"),
-                            "reroute_summary": route_summary,
-                            "detour_percentage": detour_percentage,
-                            "new_eta_minutes": new_eta_minutes,
+                            "eta_minutes": new_eta_minutes,
+                            "reroute_details": {
+                                "original_distance_km": original_distance_km,
+                                "new_distance_km": new_distance_km,
+                                "detour_percentage": detour_percentage,
+                                "waypoint_count": waypoint_count,
+                                "battery_impact_pct": battery_impact_pct,
+                                "route_summary": route_summary,
+                                "new_eta_minutes": new_eta_minutes,
+                            },
                         },
                         timeout=10,
                     )
@@ -981,6 +1203,49 @@ def get_mission(order_id):
     return jsonify(mission)
 
 
+@app.route("/dispatch/missions/<order_id>/abort", methods=["POST"])
+def abort_mission(order_id):
+    """Abort an active mission (called by Order Service when order is cancelled)."""
+    mission = active_missions.get(order_id)
+    if not mission:
+        # Mission may have already been cleaned up - return success (idempotent)
+        return jsonify({"order_id": order_id, "status": "MISSION_NOT_FOUND", "message": "Mission already cleaned up or never existed"}), 200
+
+    data = request.get_json() or {}
+    reason = data.get("reason", "USER_CANCELLED")
+
+    # Update mission status before cleanup
+    mission["dispatch_status"] = f"ABORTED_{reason}"
+
+    # Get drone_id before removing mission
+    drone_id = mission.get("drone_id")
+
+    # Return drone to depot
+    if drone_id:
+        try:
+            http_requests.patch(
+                f"{DRONE_MGMT_URL}/drones/{drone_id}/status",
+                json={"status": "RETURNING_TO_DEPOT",
+                      "lat": mission["current_coords"]["lat"],
+                      "lng": mission["current_coords"]["lng"]},
+                timeout=10,
+            )
+            print(f"  [ABORT] Drone {drone_id} returning to depot for cancelled order {order_id}")
+        except Exception as e:
+            print(f"  [ABORT] Warning: could not update drone status: {e}")
+
+    # Remove from active missions
+    del active_missions[order_id]
+    print(f"  [ABORT] Mission {order_id} aborted due to {reason}")
+
+    return jsonify({
+        "order_id": order_id,
+        "drone_id": drone_id,
+        "status": "ABORTED",
+        "reason": reason
+    })
+
+
 @app.route("/dispatch/simulate/weather", methods=["POST"])
 def simulate_weather_poll():
     """Debug endpoint: manually trigger weather poll for a specific mission."""
@@ -999,6 +1264,13 @@ def simulate_weather_poll():
 
 def _run_single_poll(order_id, mission):
     """Run a single weather poll for a specific mission."""
+    # Determine destination based on mission phase (same logic as poll_active_missions)
+    mission_phase = mission.get("mission_phase", mission.get("dispatch_status", ""))
+    if mission_phase == "TO_HOSPITAL":
+        destination_coords = mission["hospital_coords"]
+    else:
+        destination_coords = mission["customer_coords"]
+
     try:
         resp = http_requests.post(
             f"{WEATHER_URL}/weather/live",
@@ -1006,7 +1278,7 @@ def _run_single_poll(order_id, mission):
                 "order_id": order_id,
                 "drone_id": mission["drone_id"],
                 "current_coords": mission["current_coords"],
-                "destination_coords": mission["customer_coords"],
+                "destination_coords": destination_coords,
             },
             timeout=15,
         )
@@ -1020,6 +1292,18 @@ def _run_single_poll(order_id, mission):
         return
 
     hazard_zone = weather_data.get("hazard_zone", {})
+
+    # PROXIMITY CHECK: Only reroute if drone is within 1km of hazard zone edge
+    distance_to_edge = distance_to_hazard_edge(mission["current_coords"], hazard_zone)
+    PROXIMITY_THRESHOLD_KM = 1.0  # Reroute only when within 1km of hazard edge
+
+    if distance_to_edge > PROXIMITY_THRESHOLD_KM:
+        print(f"  [SIM_POLL] {order_id}: Drone is {distance_to_edge:.2f}km from hazard edge (> {PROXIMITY_THRESHOLD_KM}km threshold)")
+        print(f"  [SIM_POLL] {order_id}: Continuing on intended path until closer to hazard")
+        return  # Don't reroute yet - continue following intended path
+
+    print(f"  [SIM_POLL] {order_id}: Drone is {distance_to_edge:.2f}km from hazard edge - TRIGGERING REROUTE")
+
     try:
         resp = http_requests.post(
             f"{ROUTE_URL}/route/reroute",
@@ -1027,10 +1311,11 @@ def _run_single_poll(order_id, mission):
                 "order_id": order_id,
                 "drone_id": mission["drone_id"],
                 "current_coords": mission["current_coords"],
-                "destination_coords": mission["customer_coords"],
+                "destination_coords": destination_coords,
                 "hazard_zone": hazard_zone,
                 "avoid_conditions": weather_data.get("reason", []),
                 "max_detour_minutes": 10,
+                "mission_phase": mission_phase,
             },
             timeout=15,
         )
@@ -1062,9 +1347,18 @@ def _run_single_poll(order_id, mission):
         print(f"  [REROUTE] New ETA: {new_eta_minutes:.1f} minutes")
 
         # Store comprehensive reroute details in mission object
+        # Preserve original phase so we know where the drone was heading before reroute
+        mission["reroute_original_phase"] = mission_phase  # e.g. "TO_HOSPITAL" or "TO_CUSTOMER"
         mission["dispatch_status"] = "REROUTED_IN_FLIGHT"
+        mission["mission_phase"] = "REROUTED_IN_FLIGHT"  # Update mission phase to reflect rerouting
         mission["route_id"] = reroute_data.get("route_id")
         mission["updated_eta"] = reroute_data.get("updated_eta")
+        # Store A* waypoints for position interpolation
+        mission["waypoints"] = reroute_data.get("waypoints", [])
+        # The ETA for the waypoint leg alone
+        mission["waypoint_initial_eta"] = new_eta_minutes
+        # Snapshot the drone's position at reroute time
+        mission["reroute_start_coords"] = mission["current_coords"].copy()
         # Store comprehensive reroute details in mission object
         mission["reroute_details"] = {
             "original_distance_km": original_distance_km,
@@ -1077,8 +1371,8 @@ def _run_single_poll(order_id, mission):
         }
         # Reset the countdown ETA to the rerouted distance's ETA
         if reroute_data.get("eta_minutes"):
-            mission["eta_minutes"] = reroute_data["eta_minutes"]
-            mission["initial_eta"] = reroute_data["eta_minutes"]
+            mission["eta_minutes"] = new_eta_minutes
+            mission["initial_eta"] = new_eta_minutes
         try:
             http_requests.post(
                 f"{ORDER_URL}/dispatch/update",
@@ -1086,7 +1380,7 @@ def _run_single_poll(order_id, mission):
                     "order_id": order_id,
                     "drone_id": mission["drone_id"],
                     "dispatch_status": "REROUTED_IN_FLIGHT",
-                    "mission_phase": mission.get("mission_phase", "TO_CUSTOMER"),  # Preserve current phase
+                    "mission_phase": "REROUTED_IN_FLIGHT",  # Update to rerouted phase
                     "route_id": reroute_data.get("route_id"),
                     "updated_eta": reroute_data.get("updated_eta"),
                     "reroute_summary": route_summary,
@@ -1097,6 +1391,135 @@ def _run_single_poll(order_id, mission):
             )
         except Exception as e:
             print(f"  [SIM_POLL] Warning: could not update order service: {e}")
+
+
+@app.route("/dispatch/reset-all", methods=["POST"])
+def reset_all_drones():
+    """Reset all drones to central depot and cancel all active missions."""
+    global active_missions
+
+    # Get depot location
+    depot_coords = get_depot_location()
+
+    # Track results
+    cancelled_missions = []
+    reset_drones = []
+    errors = []
+
+    # First, get all orders from order service and cancel any with active statuses
+    # This handles orphaned orders that aren't in active_missions (e.g., after service restart)
+    active_statuses = ["CONFIRMED", "TO_HOSPITAL", "TO_CUSTOMER", "IN_TRANSIT", "IN_FLIGHT", "REROUTED_IN_FLIGHT", "DISPATCHED"]
+    try:
+        resp = http_requests.get(f"{ORDER_URL}/orders", timeout=10)
+        if resp.ok:
+            all_orders = resp.json().get("orders", [])
+            for order in all_orders:
+                if order.get("status") in active_statuses:
+                    order_id = order.get("order_id")
+                    try:
+                        http_requests.post(
+                            f"{ORDER_URL}/order/{order_id}/cancel",
+                            json={"reason": "SYSTEM_RESET", "status": "CANCELLED", "message": "All drones reset to depot"},
+                            timeout=10,
+                        )
+                        cancelled_missions.append(order_id)
+                        print(f"  [RESET] Cancelled orphaned order {order_id}")
+                    except Exception as e:
+                        errors.append(f"Failed to cancel order {order_id}: {e}")
+                        print(f"  [RESET] Error cancelling order {order_id}: {e}")
+    except Exception as e:
+        errors.append(f"Failed to fetch orders: {e}")
+        print(f"  [RESET] Error fetching orders: {e}")
+
+    # Also cancel any remaining active missions (for consistency)
+    mission_ids = list(active_missions.keys())
+    for order_id in mission_ids:
+        mission = active_missions.get(order_id)
+        if mission and order_id not in cancelled_missions:  # Avoid double-cancelling
+            drone_id = mission.get("drone_id")
+            try:
+                # Cancel via order service
+                http_requests.post(
+                    f"{ORDER_URL}/order/{order_id}/cancel",
+                    json={"reason": "SYSTEM_RESET", "status": "CANCELLED", "message": "All drones reset to depot"},
+                    timeout=10,
+                )
+                cancelled_missions.append(order_id)
+                print(f"  [RESET] Cancelled mission {order_id}")
+            except Exception as e:
+                errors.append(f"Failed to cancel order {order_id}: {e}")
+                print(f"  [RESET] Error cancelling order {order_id}: {e}")
+
+    # Clear active missions
+    active_missions.clear()
+
+    # Reset all drones to depot
+    try:
+        resp = http_requests.get(f"{DRONE_MGMT_URL}/drones", timeout=10)
+        drones = resp.json()
+
+        for drone in drones:
+            drone_id = drone.get("drone_id")
+            try:
+                http_requests.patch(
+                    f"{DRONE_MGMT_URL}/drones/{drone_id}/status",
+                    json={
+                        "status": "AVAILABLE",
+                        "battery": 100,  # Reset to full battery
+                        "lat": depot_coords["lat"],
+                        "lng": depot_coords["lng"],
+                        "current_lat": depot_coords["lat"],
+                        "current_lng": depot_coords["lng"],
+                        "target_lat": depot_coords["lat"],
+                        "target_lng": depot_coords["lng"],
+                    },
+                    timeout=10,
+                )
+                reset_drones.append(drone_id)
+                print(f"  [RESET] Reset drone {drone_id} to depot")
+            except Exception as e:
+                errors.append(f"Failed to reset drone {drone_id}: {e}")
+                print(f"  [RESET] Error resetting drone {drone_id}: {e}")
+    except Exception as e:
+        errors.append(f"Failed to fetch drones: {e}")
+        print(f"  [RESET] Error fetching drones: {e}")
+
+    return jsonify({
+        "status": "RESET_COMPLETE",
+        "cancelled_missions": cancelled_missions,
+        "reset_drones": reset_drones,
+        "errors": errors,
+        "depot_location": depot_coords
+    })
+
+
+@app.route("/dispatch/fastforward", methods=["GET", "POST"])
+def fastforward_mode():
+    """Get or set fast-forward simulation mode."""
+    global fast_forward_mode
+
+    if request.method == "POST":
+        data = request.get_json() or {}
+        enabled = data.get("enabled", False)
+        multiplier = data.get("multiplier", 4.0)
+
+        fast_forward_mode["enabled"] = enabled
+        fast_forward_mode["multiplier"] = max(1.0, min(100.0, multiplier))  # Clamp between 1x and 100x
+
+        action = "ENABLED" if enabled else "DISABLED"
+        print(f"  [FAST-FORWARD] Fast-forward mode {action} (multiplier: {fast_forward_mode['multiplier']}x)")
+
+        return jsonify({
+            "status": "FAST_FORWARD_" + action,
+            "enabled": fast_forward_mode["enabled"],
+            "multiplier": fast_forward_mode["multiplier"]
+        })
+
+    # GET request - return current status
+    return jsonify({
+        "enabled": fast_forward_mode["enabled"],
+        "multiplier": fast_forward_mode["multiplier"]
+    })
 
 
 @app.route("/health", methods=["GET"])
