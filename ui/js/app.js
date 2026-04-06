@@ -735,7 +735,10 @@ function navigateTo(page) {
         document.getElementById(`nav-${p}`).classList.toggle("active", p === page);
     });
 
-    if (page === "inventory" && !searchItemsLoaded) loadSearchItems();
+    if (page === "inventory") {
+        loadSearchItems();
+        if (document.getElementById("search-item-select").value) searchInventory();
+    }
     if (page === "drones") loadDrones();
     if (page === "simulation") {
         refreshSimulationStatus();
@@ -806,7 +809,7 @@ async function searchInventory() {
 
     try {
         const [invResp, hospNames] = await Promise.all([
-            fetch(`${API_BASE}/api/inventory/inventory`),
+            fetch(`${API_BASE}/api/inventory/inventory`, { cache: "no-store" }),
             fetchHospitalNames()
         ]);
         const allRows = await invResp.json();

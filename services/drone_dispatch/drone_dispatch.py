@@ -887,6 +887,15 @@ def poll_active_missions():
                 continue
 
             print(f"  [POLL] UNSAFE weather detected for {order_id} (phase: {mission_phase}): {weather_data.get('reason')}")
+
+            # Mode 1 cancellation: force_unsafe with no hazard zones means entire area is unsafe.
+            # No reroute is possible — abort mission directly.
+            weather_source = weather_data.get("source", "")
+            if weather_source == "SIMULATION_FORCE_UNSAFE":
+                print(f"  [POLL] {order_id}: Force unsafe mode (entire area unsafe) — aborting mission directly")
+                handle_mission_abort(order_id, mission)
+                continue
+
             hazard_zone = weather_data.get("hazard_zone", {})
 
             # PROXIMITY CHECK: Only reroute if drone is within 1km of hazard zone edge
@@ -1289,6 +1298,14 @@ def _run_single_poll(order_id, mission):
 
     if weather_data.get("status") != "UNSAFE":
         print(f"  [SIM_POLL] Weather is SAFE for {order_id}")
+        return
+
+    # Mode 1 cancellation: force_unsafe with no hazard zones means entire area is unsafe.
+    # No reroute is possible — abort mission directly.
+    weather_source = weather_data.get("source", "")
+    if weather_source == "SIMULATION_FORCE_UNSAFE":
+        print(f"  [SIM_POLL] {order_id}: Force unsafe mode (entire area unsafe) — aborting mission directly")
+        handle_mission_abort(order_id, mission)
         return
 
     hazard_zone = weather_data.get("hazard_zone", {})
