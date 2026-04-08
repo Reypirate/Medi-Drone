@@ -1,12 +1,12 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { API_BASE } from '../../../lib/api';
+import { ORDER_URL } from '../../../lib/api';
 
 export function useOrderMutations() {
   const queryClient = useQueryClient();
 
   const submitOrder = useMutation({
     mutationFn: async (payload: any) => {
-      const res = await fetch(`${API_BASE}/api/order/order`, {
+      const res = await fetch(`${ORDER_URL}/order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -20,12 +20,13 @@ export function useOrderMutations() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
       queryClient.invalidateQueries({ queryKey: ['inventory'] });
+      queryClient.invalidateQueries({ queryKey: ['missions'] });
     },
   });
 
   const cancelOrder = useMutation({
     mutationFn: async (orderId: string) => {
-      const res = await fetch(`${API_BASE}/api/order/order/${orderId}/cancel`, {
+      const res = await fetch(`${ORDER_URL}/order/${orderId}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: "USER_REQUEST" })
@@ -35,17 +36,19 @@ export function useOrderMutations() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['missions'] });
     }
   });
 
   const deleteOrder = useMutation({
     mutationFn: async (orderId: string) => {
-      const res = await fetch(`${API_BASE}/api/order/order/${orderId}`, { method: 'DELETE' });
+      const res = await fetch(`${ORDER_URL}/${orderId}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['orders'] });
+      queryClient.invalidateQueries({ queryKey: ['missions'] });
     }
   });
 

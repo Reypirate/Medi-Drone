@@ -1,5 +1,9 @@
-export const API_BASE = '/api'; // Proxied to localhost:8000 via Vite
-export const DISPATCH_URL = 'http://localhost:5002';
-export const WEATHER_URL = API_BASE;
-export const INVENTORY_URL = `${API_BASE}/api/inventory`;
-export const FLEET_URL = `${API_BASE}/api/fleet`;
+export const API_BASE = '/api'; 
+export const DISPATCH_URL = `${API_BASE}/dispatch`;
+export const WEATHER_URL = `${API_BASE}/weather`;
+export const INVENTORY_URL = `${API_BASE}/inventory`;
+export const FLEET_URL = `${API_BASE}/drones`;
+export const ORDER_URL = `${API_BASE}/order`;
+export const ORDERS_LIST_URL = `${API_BASE}/orders`;
+export const GEOLOCATION_URL = `${API_BASE}/geolocation`;
+export const HOSPITAL_URL = `${API_BASE}/hospital`;

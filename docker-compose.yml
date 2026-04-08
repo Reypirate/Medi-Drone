@@ -290,6 +290,7 @@ services:
       - ./frontend/.env
     environment:
       VITE_GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      UPSTREAM_GATEWAY_URL: http://kong:8000
       PORT: 8080
     ports:
       - "8080:8080"

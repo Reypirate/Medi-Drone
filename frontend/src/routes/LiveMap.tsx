@@ -4,11 +4,12 @@ import { useEffect, useState } from 'react';
 import { APIProvider, Map, AdvancedMarker, useMap, InfoWindow } from '@vis.gl/react-google-maps';
 import { useDrones } from '../features/fleet/hooks/use-drones';
 import { useActiveMissions } from '../features/orders/hooks/use-orders';
+import { useHospitals } from '../features/orders/hooks/use-hospitals';
 import { useSimulationStatus } from '../features/simulation/hooks/use-simulation';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plane, Activity, Navigation } from 'lucide-react';
+import { Plane, Activity, Navigation, Building2 } from 'lucide-react';
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || 'YOUR_API_KEY_HERE';
 const SINGAPORE_CENTER = { lat: 1.3521, lng: 103.8198 };
@@ -69,6 +70,7 @@ function Circle({ center, radius, color, opacity = 0.2 }: { center: any, radius:
 export default function LiveMap() {
   const [selectedDroneId, setSelectedDroneId] = useState<string | null>(null);
   const { data: drones = [] } = useDrones();
+  const { data: hospitals = [] } = useHospitals();
   const { data: missionsData } = useActiveMissions();
   const { data: simStatus } = useSimulationStatus();
 
@@ -92,6 +94,23 @@ export default function LiveMap() {
             { featureType: "road", elementType: "geometry", stylers: [{ color: "#1e293b" }] },
           ]}
         >
+          {/* Hospital Network (Dispatch Sources) */}
+          {hospitals.map((h: any) => (
+            <AdvancedMarker 
+              key={h.hospital_id}
+              position={{ lat: h.lat, lng: h.lng }}
+              title={h.name}
+            >
+              <div className="flex flex-col items-center group">
+                 <div className="p-1.5 bg-slate-100 rounded-lg border-2 border-primary shadow-[0_0_15px_rgba(168,85,247,0.4)] transition-transform group-hover:scale-110">
+                    <Building2 className="h-5 w-5 text-primary" />
+                 </div>
+                 <div className="mt-1 px-2 py-0.5 bg-slate-900/90 text-[9px] font-black text-white rounded border border-slate-700 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                   {h.name}
+                 </div>
+              </div>
+            </AdvancedMarker>
+          ))}
           {/* Mission Flight Paths */}
           {activeMissions.map((m: any) => {
              const isRerouted = m.dispatch_status === 'REROUTED_IN_FLIGHT';

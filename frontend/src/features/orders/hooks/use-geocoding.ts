@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { API_BASE } from '../../../lib/api';
+import { GEOLOCATION_URL } from '../../../lib/api';
 
 export function useGeocoding() {
   const [validation, setValidation] = useState<{
@@ -19,10 +19,10 @@ export function useGeocoding() {
     let url;
     if (mode === 'postal') {
       const params = new URLSearchParams({ address: values.postalCode + " Singapore", region: "sg" });
-      url = `${API_BASE}/api/geolocation/maps/api/geocode/json?${params}`;
+      url = `${GEOLOCATION_URL}/maps/api/geocode/json?${params}`;
     } else {
       const params = new URLSearchParams({ lat: values.lat, lng: values.lng });
-      url = `${API_BASE}/api/geolocation/maps/api/reverse-geocode?${params}`;
+      url = `${GEOLOCATION_URL}/maps/api/reverse-geocode?${params}`;
     }
 
     try {

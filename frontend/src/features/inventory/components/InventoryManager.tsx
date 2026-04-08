@@ -25,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useInventory, useInventoryMutations } from '../hooks/use-inventory';
+import { useInventory, useInventoryMutations, useInventoryItems } from '../hooks/use-inventory';
 
 type InventoryItem = {
   hospital_id: string;
@@ -38,6 +38,7 @@ const columnHelper = createColumnHelper<InventoryItem>();
 export function InventoryManager() {
   const [selectedItem, setSelectedItem] = useState<string>('');
   const { data: inventory, isLoading } = useInventory(selectedItem || undefined);
+  const { data: itemList, isLoading: itemsLoading } = useInventoryItems();
   const { restockMutation } = useInventoryMutations();
 
   const totalStock = useMemo(() => {
@@ -120,17 +121,15 @@ export function InventoryManager() {
               <div className="flex-1">
                 <Select value={selectedItem === '' ? 'all' : selectedItem} onValueChange={(val) => setSelectedItem(val === 'all' || !val ? '' : val)}>
                   <SelectTrigger className="h-10">
-                    <SelectValue placeholder="-- Select Medical Item --" />
+                    <SelectValue placeholder={itemsLoading ? "Loading inventory items..." : "-- Select Medical Item --"} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">-- Select Medical Item --</SelectItem>
-                    <SelectItem value="DEFIB_001">Automated External Defibrillator</SelectItem>
-                    <SelectItem value="EPI_001">Epinephrine Auto-injector</SelectItem>
-                    <SelectItem value="BLOOD_O_NEG">O-Negative Blood Unit</SelectItem>
-                    <SelectItem value="ANTIVENOM_001">Snake Antivenom</SelectItem>
-                    <SelectItem value="OXYGEN_001">Portable Oxygen Cylinder</SelectItem>
-                    <SelectItem value="INSULIN_001">Insulin Vial</SelectItem>
-                    <SelectItem value="TRAUMA_KIT_001">Advanced Trauma Kit</SelectItem>
+                    <SelectItem value="all">-- Show All Items --</SelectItem>
+                    {itemList?.map((item: any) => (
+                      <SelectItem key={item.item_id} value={item.item_id}>
+                        {item.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

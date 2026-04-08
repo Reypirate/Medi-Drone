@@ -101,7 +101,7 @@ export function DroneDashboard({ drones, missionsByDrone, isLoading, isFetching 
           let variant: 'default' | 'secondary' | 'destructive' | 'outline' = 'outline';
           let icon = null;
 
-          if (displayStatus === 'OPERATIONAL') {
+          if (displayStatus === 'OPERATIONAL' || displayStatus === 'AVAILABLE') {
             variant = 'default';
             icon = <ShieldCheck className="h-3 w-3 mr-1" />;
           } else if (displayStatus.includes('FLIGHT') || displayStatus.includes('TRANSIT') || displayStatus.includes('HOSPITAL') || displayStatus.includes('CUSTOMER')) {
@@ -115,7 +115,7 @@ export function DroneDashboard({ drones, missionsByDrone, isLoading, isFetching 
           return (
             <Badge variant={variant} className="text-[10px] py-0.5 h-6 px-2 rounded-md uppercase font-bold tracking-tight">
               {icon}
-              {displayStatus.replace(/_/g, ' ')}
+              {displayStatus === 'AVAILABLE' ? 'OPERATIONAL' : displayStatus.replace(/_/g, ' ')}
             </Badge>
           );
         },
@@ -154,19 +154,19 @@ export function DroneDashboard({ drones, missionsByDrone, isLoading, isFetching 
     getSortedRowModel: getSortedRowModel(),
   });
 
-  const operational = allDrones.filter(d => d.status === 'OPERATIONAL').length;
+  const operational = allDrones.filter(d => d.status === 'OPERATIONAL' || d.status === 'AVAILABLE').length;
   const inFlight = Object.keys(missionsByDrone).length;
   const faulty = allDrones.filter(d => d.status === 'FAULTY').length;
-  const lowBat = allDrones.filter(d => d.status === 'LOW_BATTERY' || (d.status === 'OPERATIONAL' && d.battery < 30)).length;
+  const charging = allDrones.filter(d => (d.status === 'OPERATIONAL' || d.status === 'AVAILABLE') && d.battery < 30).length;
 
   return (
     <>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: 'Total Fleet', value: allDrones.length, sub: 'Units Online', color: 'text-foreground' },
-          { label: 'Operational', value: operational, sub: 'Ready for Dispatch', color: 'text-primary' },
+          { label: 'Operational', value: operational, sub: `${charging} Docked / Charging`, color: 'text-primary' },
           { label: 'In Flight', value: inFlight, sub: 'Active Missions', color: 'text-blue-500' },
-          { label: 'Maintenance', value: faulty + lowBat, sub: 'Repair or Charge', color: 'text-destructive' },
+          { label: 'Maintenance', value: faulty, sub: 'Hardware Repair', color: 'text-destructive' },
         ].map((stat) => (
           <Card key={stat.label} className="border-primary/5 shadow-sm overflow-hidden relative">
             <CardContent className="p-6">

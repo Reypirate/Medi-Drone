@@ -3,6 +3,8 @@ import { MapPin, Check, X, AlertTriangle, ExternalLink } from 'lucide-react';
 import { orderSchema } from '../validation';
 import { useOrderMutations } from '../hooks/use-order-mutations';
 import { useGeocoding } from '../hooks/use-geocoding';
+import { useInventoryItems } from '../../inventory/hooks/use-inventory';
+import { useHospitals } from '../hooks/use-hospitals';
 import { 
   CardContent, 
   CardHeader, 
@@ -25,6 +27,8 @@ import {
 export function OrderForm({ onSuccess }: { onSuccess?: () => void }) {
   const { submitOrder } = useOrderMutations();
   const { validation, checkAddress, confirmAddress, resetValidation } = useGeocoding();
+  const { data: inventoryItems, isLoading: itemsLoading } = useInventoryItems();
+  const { data: hospitals } = useHospitals();
 
   const form = useForm({
     defaultValues: {
@@ -107,14 +111,14 @@ export function OrderForm({ onSuccess }: { onSuccess?: () => void }) {
                     <Label htmlFor={field.name}>Medical Item</Label>
                     <Select value={field.state.value} onValueChange={(val: string | null) => field.handleChange(val ?? '')}>
                       <SelectTrigger id={field.name} className="h-9">
-                        <SelectValue placeholder="-- Select Item --" />
+                        <SelectValue placeholder={itemsLoading ? "Loading items..." : "-- Select Item --"} />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="DEFIB_001">Automated External Defibrillator</SelectItem>
-                        <SelectItem value="EPI_001">Epinephrine Auto-injector</SelectItem>
-                        <SelectItem value="BLOOD_O_NEG">O-Negative Blood Unit</SelectItem>
-                        <SelectItem value="ANTIVENOM_001">Snake Antivenom</SelectItem>
-                        <SelectItem value="INSULIN_001">Insulin Vial</SelectItem>
+                        {inventoryItems?.map((item: any) => (
+                          <SelectItem key={item.item_id} value={item.item_id}>
+                            {item.name}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -178,9 +182,17 @@ export function OrderForm({ onSuccess }: { onSuccess?: () => void }) {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">Auto-select Nearest Hospital</SelectItem>
-                    <SelectItem value="HOSP_001">Central General Hospital</SelectItem>
-                    <SelectItem value="HOSP_002">Northside Medical Center</SelectItem>
-                    <SelectItem value="HOSP_003">Westend Clinic</SelectItem>
+                    {hospitals && hospitals.length > 0 ? (
+                      hospitals.map((h: any) => (
+                        <SelectItem key={h.hospital_id || h.Id} value={h.hospital_id || h.Id}>
+                          {h.name || h.Name || h.location_name}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="loading" disabled>
+                        {hospitals ? "No hospitals available" : "Loading hospitals..."}
+                      </SelectItem>
+                    )}
                   </SelectContent>
                 </Select>
               </div>

@@ -1,13 +1,16 @@
 import { useQuery } from '@tanstack/react-query';
-import { API_BASE } from '../../../lib/api';
+import { HOSPITAL_URL } from '../../../lib/api';
 
 export const useHospitals = () => {
   return useQuery({
     queryKey: ['hospitals'],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/api/inventory/hospitals`);
+      // HOSPITAL_URL is already '/api/hospital'
+      const res = await fetch(`${HOSPITAL_URL}/hospitals`);
       if (!res.ok) throw new Error('Failed to fetch hospitals');
-      return res.json();
+      const data = await res.json();
+      // Handle both direct array and { hospitals: [...] } wrapper
+      return Array.isArray(data) ? data : data.hospitals || [];
     },
   });
 };
