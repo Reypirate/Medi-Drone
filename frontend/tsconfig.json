@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "esnext",
+    "types": [
+      "vite/client",
+      "node"
+    ],
+    "skipLibCheck": true,
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    /* Paths */
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "strict": true,
+    "strictNullChecks": true
+  },
+  "include": [
+    "src",
+    "vite.config.ts"
+  ]
+}
