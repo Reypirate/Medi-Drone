@@ -59,6 +59,14 @@ This will start all 15 containers. Wait for all services to report "running on p
 | **Kong API Gateway** | http://localhost:8000 | - |
 | **Kong Admin API** | http://localhost:8001 | - |
 | **RabbitMQ Management** | http://localhost:15672 | guest/guest |
+| **Frontend Dev Server** | http://localhost:8080 | (Run via `pnpm run dev` in `/frontend`) |
+
+### 6. Frontend Development
+If you want to modify the frontend with Hot Module Replacement (HMR):
+1. Navigate to `cd frontend`.
+2. Install dependencies: `pnpm install`.
+3. Start development server: `pnpm run dev`.
+4. The dashboard will be available at `http://localhost:8080` (proxying requests to Kong).
 
 ### 5. Stop all services
 
@@ -134,6 +142,6 @@ The application uses a microservices architecture with 9 services:
 - **Message Broker:** RabbitMQ 3.x (AMQP protocol)
 - **Databases:** MySQL 8.0
 - **API Gateway:** Kong 3.8
-- **Frontend:** HTML5, CSS3, JavaScript (ES6+)
-- **Web Server:** Nginx Alpine
+- **Frontend:** React 19, TypeScript, TanStack Suite (Router, Query, Table, Form)
+- **Web Server:** Hono (Bun Runtime)
 - **Containerization:** Docker, Docker Compose

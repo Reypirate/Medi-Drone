@@ -206,3 +206,9 @@ if __name__ == "__main__":
     wait_for_db()
     print("  Drone Management Service running on port 5008")
     app.run(host="0.0.0.0", port=5008, debug=True)
+
+
+if __name__ == "__main__":
+    wait_for_db()
+    print("  Drone Management Service running on port 5008")
+    app.run(host="0.0.0.0", port=5008, debug=True)

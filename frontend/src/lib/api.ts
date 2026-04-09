@@ -1,0 +1,9 @@
+export const API_BASE = '/api'; 
+export const DISPATCH_URL = `${API_BASE}/dispatch`;
+export const WEATHER_URL = `${API_BASE}/weather`;
+export const INVENTORY_URL = `${API_BASE}/inventory`;
+export const FLEET_URL = `${API_BASE}/drones`;
+export const ORDER_URL = `${API_BASE}/order`;
+export const ORDERS_LIST_URL = `${API_BASE}/orders`;
+export const GEOLOCATION_URL = `${API_BASE}/geolocation`;
+export const HOSPITAL_URL = `${API_BASE}/hospital`;
